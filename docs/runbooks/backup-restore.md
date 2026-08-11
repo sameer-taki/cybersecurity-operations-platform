@@ -15,7 +15,14 @@ The proposed targets are SaaS RPO ≤ 15 minutes/RTO ≤ 4 hours and dedicated R
 
 ## Restore rehearsal
 
-For the Phase 1 rehearsal, the PostgreSQL 16 Docker container used to validate the migration was disposable. The DDL was applied with `alembic upgrade head`, verified with RLS/role queries, then removed; this proves schema recreation, not a production backup restore. The first operational rehearsal must:
+Performed locally with PostgreSQL 16 Docker containers: `pg_dump
+--format=custom --no-owner` captured the running `cyberops` database, the dump
+was encrypted with AES-256-CBC/PBKDF2 using a local rehearsal-only key, then
+decrypted and restored into a clean PostgreSQL 16 container. The restore
+required pre-creating the `app_runtime` and `platform_admin` group roles
+because policy ownership is part of the dump. `SELECT count(*) FROM tenants`
+returned `2` after restore. The rehearsal was disposable and did not prove
+object backup, so the first operational rehearsal must:
 
 1. Restore a recent encrypted dump into a clean PostgreSQL 16 database.
 2. Restore raw objects into a clean S3-compatible bucket.

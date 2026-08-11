@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from app.audit import append_audit
 from app.auth import auth_sessions, authenticate, logout, rotate_refresh_token
+from app.db import platform_session_factory
 from app.deps import tenant_session
 from app.event_contract import event_json_schema
 from app.rbac import Principal
@@ -154,7 +155,7 @@ async def require_tenant_admin(
 
 @app.post("/api/v1/platform/tenants", status_code=status.HTTP_201_CREATED)
 async def create_tenant(request: TenantCreateRequest) -> dict[str, str]:
-    async with auth_sessions() as session:
+    async with platform_session_factory() as session:
         async with session.begin():
             tenant_id = uuid4()
             await session.execute(

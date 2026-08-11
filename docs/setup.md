@@ -11,6 +11,10 @@ docker compose -f infra/docker-compose.yml run --rm seed
 
 The API is at `http://localhost:8000`; health is `GET /health`. The stack contains PostgreSQL 16, MinIO, Redis, the migration step, API, and seed service. `docker compose ... down -v` removes local data.
 
+The API tenant-registry path uses the dedicated `platform_admin_login` deployment
+role; ordinary tenant-plane requests use `app_api_login`. The DDL owner is not
+used for registry reads or writes.
+
 Development-only seeded users:
 
 | Tenant | Email | Password |

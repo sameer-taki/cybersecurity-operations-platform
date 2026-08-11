@@ -1,6 +1,6 @@
 # Fiji & Pacific Cyber Operations Platform
 
-Phase 0 design for an enterprise, multi-tenant cyber monitoring and incident-response platform for Fiji and the Pacific. The platform collects security telemetry, normalises and detects threats, preserves evidence, supports human-reviewed AI investigation, reports risk, and enables approved response actions.
+Phase 1 secure foundation for an enterprise, multi-tenant cyber monitoring and incident-response platform for Fiji and the Pacific. The platform collects security telemetry, normalises and detects threats, preserves evidence, supports human-reviewed AI investigation, reports risk, and enables approved response actions.
 
 ## Capability pillars
 

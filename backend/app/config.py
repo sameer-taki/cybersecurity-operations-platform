@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     database_url: str = Field(alias="DATABASE_URL")
+    platform_database_url: str | None = Field(default=None, alias="PLATFORM_DATABASE_URL")
     ddl_database_url: str = Field(alias="DDL_DATABASE_URL")
     jwt_secret: str = Field(alias="JWT_SECRET")
     jwt_issuer: str = Field(default="cyberops", alias="JWT_ISSUER")

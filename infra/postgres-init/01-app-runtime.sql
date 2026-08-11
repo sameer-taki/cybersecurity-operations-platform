@@ -2,3 +2,5 @@ CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
 CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS;
 CREATE ROLE app_api_login LOGIN PASSWORD 'app_runtime' NOSUPERUSER NOBYPASSRLS;
 GRANT app_runtime TO app_api_login;
+CREATE ROLE platform_admin_login LOGIN PASSWORD 'platform_admin' NOSUPERUSER NOBYPASSRLS;
+GRANT platform_admin TO platform_admin_login;

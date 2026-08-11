@@ -14,6 +14,13 @@ from sqlalchemy.ext.asyncio import (
 settings = get_settings()
 engine: Final[AsyncEngine] = create_async_engine(settings.database_url, pool_pre_ping=True)
 session_factory: Final[async_sessionmaker[AsyncSession]] = async_sessionmaker(engine, expire_on_commit=False)
+platform_engine: Final[AsyncEngine] = create_async_engine(
+    settings.platform_database_url or settings.database_url,
+    pool_pre_ping=True,
+)
+platform_session_factory: Final[async_sessionmaker[AsyncSession]] = async_sessionmaker(
+    platform_engine, expire_on_commit=False
+)
 
 
 @asynccontextmanager

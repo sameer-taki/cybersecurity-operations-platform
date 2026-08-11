@@ -17,3 +17,9 @@
 | [Open decisions](open-decisions.md) | Decisions requiring product/customer input |
 
 No production runtime is included in Phase 0.
+
+## Phase 1 additions
+
+- [Setup](setup.md)
+- [Backup and restore runbook](runbooks/backup-restore.md)
+- [ADRs](adr/)

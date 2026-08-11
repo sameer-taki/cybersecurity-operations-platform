@@ -36,7 +36,7 @@ Scores are qualitative likelihood × impact (1–5).
 
 ### Cross-tenant access
 
-Set `app.current_tenant` inside every transaction; never trust a request body tenant ID. RLS policies use `current_setting(..., true)` and reject unset context. Service-to-service calls carry tenant context and permission claims. Tests must attempt IDs, filters, exports, evidence objects, reports, and AI bundles from another tenant.
+Set `app.current_tenant` inside every transaction; never trust a request body tenant ID. RLS policies use `current_setting(..., true)` and reject unset context. Every tenant-owned table and partition is both enabled and forced into RLS. Migrations use a DDL/owner role; runtime uses a separate non-owner, no-BYPASSRLS role. Service-to-service calls carry tenant context and permission claims. Tests must attempt IDs, filters, exports, evidence objects, reports, and AI bundles from another tenant, including a check that the app role is not the table owner.
 
 ### Log-content prompt injection
 
@@ -68,3 +68,4 @@ Outbound connectors use an explicit egress proxy/allow-list. Validate scheme, ho
 10. Audit update/delete, broken hash chain, or evidence hash mismatch is accepted.
 11. DLQ replay crosses tenant or loses idempotency.
 12. Secrets appear in logs, report exports, raw event prompts, or error envelopes.
+13. Runtime `app_runtime` is made table owner, superuser, or `BYPASSRLS`, or directly selects the control-plane `tenants` registry.

@@ -10,16 +10,16 @@ The canonical event is the plan's schema, extended only with its required retent
   "actor": {"user_id":null,"username":null,"ip":"203.0.113.10"},
   "target": {"asset_id":"asset_789","hostname":"vpn.example","ip":"10.0.0.5"},
   "event_type":"authentication_failure","severity":"medium","confidence":0.94,
-  "action":"login","outcome":"failure","raw_event_ref":"object://raw/evt_01JABC",
+  "action":"login","outcome":"failure","raw_event_ref":"object://raw/tenant_123/2026/08/11/evt_01JABC",
   "parser_name":"generic-syslog","parser_version":"1.0.0",
   "raw_event_sha256":"<64 lowercase hex>","retention_class":"security_event",
   "retention_until":"2027-08-11T00:00:00Z","processing_history":[]
 }
 ```
 
-`event_id` is stable; `tenant_id` is server-derived; timestamps are UTC; source identifies origin; actor/target are nullable context; `event_type`, action, and outcome are normalised strings; severity is `low|medium|high|critical`; confidence is 0–1; raw reference/hash prove provenance; parser fields identify reproducibility; retention fields drive policy; processing history records stage/version/status without secrets.
+`event_id` is stable; `tenant_id` is server-derived; timestamps are UTC; source identifies origin; actor/target are nullable context; `event_type`, action, and outcome are normalised strings; severity is `low|medium|high|critical`; confidence is 0–1; `raw_event_ref` and `raw_event_sha256` are mandatory and prove that retrievable original bytes exist; parser fields identify reproducibility; retention fields drive policy; processing history records stage/version/status without secrets. The canonical URI grammar is `object://raw/<tenant_id>/<YYYY>/<MM>/<DD>/<event_id>`: the tenant segment is derived from authenticated context, never input, and every read validates it against the session tenant.
 
-Parser input must be treated as untrusted, preserve the original bytes, return a schema-valid event or a structured parse failure, and be deterministic for the same parser version. The deduplication key is `(tenant_id, source connector, source event ID)` when present; otherwise SHA-256 of canonical raw bytes plus source and observed timestamp bucket. Replays retain the same event ID.
+Parser input must be treated as untrusted, preserve the original bytes, return a schema-valid event or a structured parse failure, and be deterministic for the same parser version. The ingestion path accepts only observations inside the partition-management window (current month, N months ahead, and a small back-window). Out-of-range or clock-skewed `observed_at` values are clamped or quarantined to the parse-failure path, with original bytes retained; there is no DEFAULT partition. The deduplication key is `(tenant_id, source connector, source event ID)` when present; otherwise SHA-256 of canonical raw bytes plus source and observed timestamp bucket. Replays retain the same event ID.
 
 Schema versions are additive within a major version; breaking changes increment major and retain old parser versions for replay. Three normalisation examples:
 

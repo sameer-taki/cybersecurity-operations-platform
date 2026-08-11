@@ -14,7 +14,7 @@ Customer systems -> collectors/connectors -> encrypted ingestion -> EventBus
 
 The platform is a shared-schema multi-tenant control plane. Every tenant-owned row carries `tenant_id`; PostgreSQL RLS is the final database boundary. The request context sets `SET LOCAL app.current_tenant`. Every tenant-owned table and partition uses both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`.
 
-Migrations run as a separate DDL/owner role. `app_runtime` and `platform_admin` are `NOLOGIN` group roles; deployment creates per-service `LOGIN` roles and grants membership. Each connecting login must be `NOSUPERUSER`, have no `BYPASSRLS`, and own no application objects. The control-plane service uses `platform_admin` for tenant-registry operations; tenant-plane runtime access has no `SELECT` privilege on `tenants`.
+Migrations run as a separate DDL/owner role. `app_runtime` and `platform_admin` are `NOLOGIN` group roles; deployment creates per-service `LOGIN` roles and grants membership. Each connecting login must have no effective superuser/BYPASSRLS privilege and own no application objects; deployment runs `assert_connecting_role()` as the actual login. The control-plane service uses `platform_admin` for tenant-registry operations; tenant-plane runtime access has no `SELECT` privilege on `tenants`. Tenant-registry reads/writes, including data migrations, run through the platform-admin service rather than the DDL/owner role because FORCE RLS also closes the registry to the owner.
 
 ## Core services and boundaries
 
@@ -50,7 +50,7 @@ FastAPI and Pydantic provide typed HTTP contracts; SQLAlchemy/Alembic provide ex
 
 ## Scaling and failure modes
 
-- Partition `events` monthly by `observed_at`; the partition-management job must create the current month, N months ahead, and a small back-window, then apply grants for direct maintenance access plus `ENABLE` + `FORCE ROW LEVEL SECURITY` and the parent policy to every partition. Do not create a DEFAULT partition: ingestion clamps/quarantines out-of-range or clock-skewed observations to a parse-failure/quarantine path while retaining original bytes.
+- Partition `events` monthly by `observed_at`; the partition-management job is the only partition-creation path. It must create the current month, N months ahead, and a small back-window, then apply explicit grants for direct maintenance access plus `ENABLE` + `FORCE ROW LEVEL SECURITY` and the parent policy to every partition. Do not create a DEFAULT partition: ingestion clamps/quarantines out-of-range or clock-skewed observations to a parse-failure/quarantine path while retaining original bytes. Incident-to-event existence is application-enforced so retention can detach/drop old partitions without case-link FKs blocking it.
 - Apply bounded queue consumers and per-tenant quotas to create backpressure rather than dropping events.
 - Retry transient work with exponential backoff; poison messages go to a tenant-scoped DLQ with reason and original payload reference.
 - Replay is an explicit, audited operation with idempotency keys and parser-version selection.

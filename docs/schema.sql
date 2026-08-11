@@ -8,8 +8,16 @@
 -- SELECT privilege on tenants.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS citext;
-CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
-CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime') THEN
+    CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platform_admin') THEN
+    CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS;
+  END IF;
+END $$;
 CREATE TYPE severity AS ENUM ('low','medium','high','critical');
 CREATE TYPE outcome AS ENUM ('success','failure','unknown');
 CREATE TYPE incident_status AS ENUM ('open','investigating','contained','resolved','closed');
@@ -25,7 +33,7 @@ CREATE TABLE api_keys (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id 
 CREATE TABLE identity_providers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id), kind text NOT NULL CHECK(kind IN ('oidc','saml')), config jsonb NOT NULL, secret_ref text, enabled boolean NOT NULL DEFAULT false);
 CREATE TABLE connectors (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id), name text NOT NULL, kind text NOT NULL, config jsonb NOT NULL DEFAULT '{}', secret_ref text, enabled boolean NOT NULL DEFAULT true, deleted_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE connector_health (connector_id uuid PRIMARY KEY REFERENCES connectors(id) ON DELETE CASCADE, tenant_id uuid NOT NULL REFERENCES tenants(id), status text NOT NULL, last_success_at timestamptz, event_count bigint NOT NULL DEFAULT 0, error_count bigint NOT NULL DEFAULT 0, last_error text, checked_at timestamptz);
-CREATE TABLE raw_event_refs (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id), event_id text NOT NULL, object_uri text NOT NULL, sha256 char(64) NOT NULL, byte_length bigint, retention_until timestamptz, legal_hold boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,event_id));
+CREATE TABLE raw_event_refs (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id), event_id text NOT NULL, object_uri text NOT NULL CHECK (object_uri ~ ('^object://raw/' || tenant_id::text || '/[0-9]{4}/[0-9]{2}/[0-9]{2}/[^/]+$')), sha256 char(64) NOT NULL, byte_length bigint, retention_until timestamptz, legal_hold boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,event_id));
 
 CREATE TABLE events (tenant_id uuid NOT NULL REFERENCES tenants(id), event_id text NOT NULL, observed_at timestamptz NOT NULL, ingested_at timestamptz NOT NULL, source jsonb NOT NULL, actor jsonb NOT NULL, target jsonb NOT NULL, event_type text NOT NULL, severity severity NOT NULL, confidence numeric(4,3) CHECK(confidence BETWEEN 0 AND 1), action text, outcome outcome NOT NULL DEFAULT 'unknown', raw_event_ref text NOT NULL, parser_name text NOT NULL, parser_version text NOT NULL, raw_event_sha256 char(64) NOT NULL, retention_class text NOT NULL DEFAULT 'security_event', retention_until timestamptz, legal_hold boolean NOT NULL DEFAULT false, processing_history jsonb NOT NULL DEFAULT '[]', payload jsonb NOT NULL DEFAULT '{}', PRIMARY KEY(tenant_id,event_id,observed_at)) PARTITION BY RANGE(observed_at);
 -- Partition manager creates the current month, N months ahead, and a small
@@ -88,9 +96,9 @@ ALTER TABLE connector_health ADD CONSTRAINT connector_health_connector_tenant_fk
 ALTER TABLE alerts ADD CONSTRAINT alerts_rule_tenant_fk FOREIGN KEY (tenant_id,rule_id) REFERENCES detection_rules(tenant_id,id);
 ALTER TABLE incidents ADD CONSTRAINT incidents_assignee_tenant_fk FOREIGN KEY (tenant_id,assignee_id) REFERENCES users(tenant_id,id);
 ALTER TABLE incident_events ADD CONSTRAINT incident_events_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id) ON DELETE CASCADE;
-ALTER TABLE incident_events ADD CONSTRAINT incident_events_event_fk FOREIGN KEY (event_tenant_id,event_id,observed_at) REFERENCES events(tenant_id,event_id,observed_at);
 ALTER TABLE evidence ADD CONSTRAINT evidence_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id) ON DELETE CASCADE;
 ALTER TABLE evidence ADD CONSTRAINT evidence_collector_tenant_fk FOREIGN KEY (tenant_id,collected_by) REFERENCES users(tenant_id,id);
+ALTER TABLE audit_log ADD CONSTRAINT audit_log_actor_tenant_fk FOREIGN KEY (tenant_id,actor_id) REFERENCES users(tenant_id,id);
 ALTER TABLE tasks ADD CONSTRAINT tasks_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id);
 ALTER TABLE tasks ADD CONSTRAINT tasks_assignee_tenant_fk FOREIGN KEY (tenant_id,assignee_id) REFERENCES users(tenant_id,id);
 ALTER TABLE comments ADD CONSTRAINT comments_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id);
@@ -132,37 +140,43 @@ CREATE POLICY platform_admin_tenant_registry ON tenants TO platform_admin
 -- catalogues are explicit SELECT-only grants; the registry is inaccessible.
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   users, roles, role_permissions, role_assignments, api_keys,
-  identity_providers, connectors, connector_health, raw_event_refs, events,
-  parsers, detection_rules, alerts, incidents, incident_events, evidence,
+  identity_providers, connectors, connector_health, events,
+  parsers, detection_rules, alerts, incidents, incident_events,
   tasks, comments, assets, asset_owners, business_services, identities,
   vulnerabilities, threat_intel, ai_investigations, response_actions,
   approvals, notifications, reports, retention_policies TO app_runtime;
+GRANT SELECT, INSERT ON raw_event_refs, evidence TO app_runtime;
 GRANT SELECT ON permissions TO app_runtime;
 REVOKE ALL ON tenants FROM app_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON tenants TO platform_admin;
 GRANT SELECT, INSERT ON audit_log TO app_runtime;
 REVOKE UPDATE, DELETE ON audit_log FROM app_runtime;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT ON TABLES TO app_runtime;
 
+-- These checks are meaningful as deployment health checks on an already
+-- provisioned cluster; the owner role necessarily owns objects in this sketch.
 DO $$
 BEGIN
   IF EXISTS (
     SELECT 1
     FROM pg_class c
     JOIN pg_roles r ON r.oid = c.relowner
-    WHERE r.rolname = 'app_runtime'
+    WHERE r.rolname IN ('app_runtime', 'platform_admin')
       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
   ) THEN
     RAISE EXCEPTION 'app_runtime must not own application tables';
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('app_runtime', 'platform_admin') AND rolsuper) THEN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles r
+    WHERE (r.rolsuper OR r.rolbypassrls)
+      AND EXISTS (
+        SELECT 1
+        FROM pg_roles g
+        WHERE g.rolname IN ('app_runtime', 'platform_admin')
+          AND pg_has_role(g.oid, r.oid, 'member')
+      )
+  ) THEN
     RAISE EXCEPTION 'service group roles must not be superusers';
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('app_runtime', 'platform_admin') AND rolbypassrls) THEN
-    RAISE EXCEPTION 'service group roles must not bypass RLS';
   END IF;
 END $$;
 
@@ -180,8 +194,9 @@ AS $$
 BEGIN
   IF EXISTS (
     SELECT 1
-    FROM pg_roles
-    WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+    FROM pg_roles r
+    WHERE (r.rolsuper OR r.rolbypassrls)
+      AND (r.rolname = current_user OR pg_has_role(current_user, r.oid, 'member'))
   ) THEN
     RAISE EXCEPTION 'connecting role must not be superuser or bypass RLS';
   END IF;

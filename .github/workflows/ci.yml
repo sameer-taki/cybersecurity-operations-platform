@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cyberops
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cyberops"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+      minio:
+        image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.3"
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy backend
+      - run: |
+          export DATABASE_URL=postgresql+asyncpg://app_runtime:app_runtime@localhost:5432/cyberops
+          export DDL_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/cyberops
+          export JWT_SECRET=ci-secret
+          export TOTP_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
+          export S3_ENDPOINT=http://localhost:9000
+          export S3_ACCESS_KEY=minioadmin
+          export S3_SECRET_KEY=minioadmin
+          export S3_BUCKET=cyberops-raw
+          export REDIS_URL=redis://localhost:6379/0
+          PGPASSWORD=postgres psql -h localhost -U postgres -d cyberops -c "CREATE ROLE app_runtime LOGIN PASSWORD 'app_runtime' NOSUPERUSER NOBYPASSRLS"
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run pytest
+      - run: uv run pip-audit --strict
+      - run: docker build -t cyberops-ci .
+      - run: cp .env.example .env && docker compose -f infra/docker-compose.yml config

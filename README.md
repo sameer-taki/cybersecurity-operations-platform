@@ -38,4 +38,4 @@ Start with the [Phase 0 index](docs/README.md), then read [architecture](docs/ar
 
 ## Status
 
-**Phase 0: design; no runtime code yet.**
+**Phase 1: secure foundation implemented; ingestion, detections, cases, AI, response, and frontend remain deferred.**

@@ -12,6 +12,7 @@ os.environ.setdefault("S3_BUCKET", "x")
 os.environ.setdefault("REDIS_URL", "redis://localhost")
 
 from app.event_contract import dedup_key, raw_object_uri, validate_raw_object_uri
+from app.rbac import attributes_match
 from app.security import (
     decrypt_totp_secret,
     encrypt_totp_secret,
@@ -59,3 +60,10 @@ def test_event_dedup_and_tenant_uri() -> None:
     uri = raw_object_uri(tenant_id, observed, "evt-1")
     assert validate_raw_object_uri(uri, tenant_id)
     assert not validate_raw_object_uri(uri, uuid4())
+
+
+def test_rbac_attribute_conditions_match_and_deny() -> None:
+    condition = {"department": "security", "clearance": "high"}
+    assert attributes_match(condition, {"department": "security", "clearance": "high", "region": "pacific"})
+    assert not attributes_match(condition, {"department": "finance", "clearance": "high"})
+    assert not attributes_match(condition, {"department": "security"})

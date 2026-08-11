@@ -30,6 +30,7 @@ def test_password_hash_and_verify() -> None:
     assert encoded != "correct horse battery staple"
     assert verify_password("correct horse battery staple", encoded)
     assert not verify_password("wrong", encoded)
+    assert not verify_password("wrong", "corrupt-argon2id-hash")
 
 
 def test_totp_secret_encryption_and_code() -> None:

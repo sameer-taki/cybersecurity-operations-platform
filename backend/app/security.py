@@ -10,11 +10,14 @@ import jwt
 import pyotp
 from app.config import get_settings
 from argon2 import PasswordHasher
-from argon2.exceptions import VerificationError, VerifyMismatchError
+from argon2.exceptions import InvalidHash, VerificationError, VerifyMismatchError
 from cryptography.fernet import Fernet
 
 password_hasher: Final[PasswordHasher] = PasswordHasher(
     time_cost=3, memory_cost=65536, parallelism=2, hash_len=32, salt_len=16
+)
+DUMMY_PASSWORD_HASH: Final[str] = (
+    "$argon2id$v=19$m=65536,t=3,p=2$ELXSs3H7u+GKP6bkUkLZtA$hFrSI8RmQAccRlUtQDGM7qNN8Ag3JSjKyGB/lUHHB7o"
 )
 
 
@@ -25,7 +28,7 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, encoded: str) -> bool:
     try:
         return password_hasher.verify(encoded, password)
-    except (VerifyMismatchError, VerificationError):
+    except (InvalidHash, VerifyMismatchError, VerificationError):
         return False
 
 

@@ -5,6 +5,8 @@ from uuid import UUID, uuid4
 from app.audit import append_audit
 from app.db import session_factory
 from app.security import (
+    DUMMY_PASSWORD_HASH,
+    decode_token,
     decrypt_totp_secret,
     hash_token,
     issue_access_token,
@@ -48,7 +50,11 @@ async def authenticate(
             user = row.mappings().first()
             now = datetime.now(UTC)
             if user is None:
+                verify_password(password, DUMMY_PASSWORD_HASH)
                 raise ValueError("invalid credentials")
+            if bool(user["tenant_required"]):
+                verify_password(password, DUMMY_PASSWORD_HASH)
+                raise ValueError("tenant required")
             user_id = UUID(str(user["user_id"]))
             tenant_id = UUID(str(user["tenant_id"]))
             await _set_tenant(session, tenant_id)
@@ -134,13 +140,13 @@ async def authenticate(
 
 
 async def rotate_refresh_token(token: str) -> TokenPair:
-    from app.security import decode_token
-
     claims = decode_token(token, "refresh")
     user_id = UUID(str(claims["sub"]))
     tenant_id = UUID(str(claims["tenant_id"]))
     family_id = UUID(str(claims["family_id"]))
     async with auth_sessions() as session:
+        reuse_detected = False
+        pair: TokenPair | None = None
         async with session.begin():
             await _set_tenant(session, tenant_id)
             result = await session.execute(
@@ -165,44 +171,49 @@ async def rotate_refresh_token(token: str) -> TokenPair:
                 await append_audit(
                     session, tenant_id, user_id, "auth.refresh_reuse", "token_family", str(family_id), {}
                 )
-                await session.commit()
-                raise ValueError("refresh token reuse detected")
-            await session.execute(
-                text("UPDATE refresh_tokens SET used_at = :now WHERE id = :id"),
-                {"now": now, "id": stored["id"]},
-            )
-            permission_rows = await session.execute(
-                text(
-                    "SELECT DISTINCT p.key FROM permissions p "
-                    "JOIN role_permissions rp ON rp.permission_id = p.id "
-                    "JOIN role_assignments ra ON ra.role_id = rp.role_id AND ra.tenant_id = rp.tenant_id "
-                    "WHERE ra.user_id = :user AND ra.tenant_id = :tenant"
-                ),
-                {"user": user_id, "tenant": tenant_id},
-            )
-            permissions = [str(item[0]) for item in permission_rows]
-            new_refresh, expires_at = issue_refresh_token(user_id, tenant_id, family_id)
-            await session.execute(
-                text(
-                    "INSERT INTO refresh_tokens "
-                    "(tenant_id,user_id,family_id,token_hash,expires_at) "
-                    "VALUES (:tenant,:user,:family,:token_hash,:expires)"
-                ),
-                {
-                    "tenant": tenant_id,
-                    "user": user_id,
-                    "family": family_id,
-                    "token_hash": hash_token(new_refresh),
-                    "expires": expires_at,
-                },
-            )
-            await append_audit(session, tenant_id, user_id, "auth.refresh_rotated", "token_family", str(family_id), {})
-            return TokenPair(issue_access_token(user_id, tenant_id, permissions), new_refresh)
+                reuse_detected = True
+            else:
+                await session.execute(
+                    text("UPDATE refresh_tokens SET used_at = :now WHERE id = :id"),
+                    {"now": now, "id": stored["id"]},
+                )
+                permission_rows = await session.execute(
+                    text(
+                        "SELECT DISTINCT p.key FROM permissions p "
+                        "JOIN role_permissions rp ON rp.permission_id = p.id "
+                        "JOIN role_assignments ra ON ra.role_id = rp.role_id AND ra.tenant_id = rp.tenant_id "
+                        "WHERE ra.user_id = :user AND ra.tenant_id = :tenant"
+                    ),
+                    {"user": user_id, "tenant": tenant_id},
+                )
+                permissions = [str(item[0]) for item in permission_rows]
+                new_refresh, expires_at = issue_refresh_token(user_id, tenant_id, family_id)
+                await session.execute(
+                    text(
+                        "INSERT INTO refresh_tokens "
+                        "(tenant_id,user_id,family_id,token_hash,expires_at) "
+                        "VALUES (:tenant,:user,:family,:token_hash,:expires)"
+                    ),
+                    {
+                        "tenant": tenant_id,
+                        "user": user_id,
+                        "family": family_id,
+                        "token_hash": hash_token(new_refresh),
+                        "expires": expires_at,
+                    },
+                )
+                await append_audit(
+                    session, tenant_id, user_id, "auth.refresh_rotated", "token_family", str(family_id), {}
+                )
+                pair = TokenPair(issue_access_token(user_id, tenant_id, permissions), new_refresh)
+        if reuse_detected:
+            raise ValueError("refresh token reuse detected")
+        if pair is None:
+            raise RuntimeError("refresh token transaction produced no result")
+        return pair
 
 
 async def logout(token: str) -> None:
-    from app.security import decode_token
-
     claims = decode_token(token, "refresh")
     family_id = UUID(str(claims["family_id"]))
     user_id = UUID(str(claims["sub"]))

@@ -307,6 +307,28 @@ async def test_refresh_replay_revokes_token_family(monkeypatch: pytest.MonkeyPat
     await owner_engine.dispose()
 
 
+async def test_ambiguous_email_requires_tenant_slug(
+    security_data: tuple[str, str, AsyncEngine, AsyncEngine],
+) -> None:
+    tenant_a, tenant_b, _runtime, owner = security_data
+    from app.auth import auth_sessions, authenticate
+
+    bind = auth_sessions.kw.get("bind")
+    if isinstance(bind, AsyncEngine):
+        await bind.dispose()
+    email = "shared@example.com"
+    async with owner.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO users (tenant_id,email,display_name) VALUES "
+                "(:tenant_a,:email,'Shared A'),(:tenant_b,:email,'Shared B')"
+            ),
+            {"tenant_a": tenant_a, "tenant_b": tenant_b, "email": email},
+        )
+    with pytest.raises(ValueError, match="tenant required"):
+        await authenticate(email, "not-the-password", None, None)
+
+
 async def test_api_key_scope_ip_and_revocation(
     security_data: tuple[str, str, AsyncEngine, AsyncEngine],
 ) -> None:

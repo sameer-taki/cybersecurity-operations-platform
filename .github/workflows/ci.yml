@@ -39,7 +39,7 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy backend
       - run: |
-          export DATABASE_URL=postgresql+asyncpg://app_runtime:app_runtime@localhost:5432/cyberops
+          export DATABASE_URL=postgresql+asyncpg://app_api_login:app_runtime@localhost:5432/cyberops
           export DDL_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/cyberops
           export JWT_SECRET=ci-secret
           export TOTP_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
@@ -48,7 +48,7 @@ jobs:
           export S3_SECRET_KEY=minioadmin
           export S3_BUCKET=cyberops-raw
           export REDIS_URL=redis://localhost:6379/0
-          PGPASSWORD=postgres psql -h localhost -U postgres -d cyberops -c "CREATE ROLE app_runtime LOGIN PASSWORD 'app_runtime' NOSUPERUSER NOBYPASSRLS"
+          PGPASSWORD=postgres psql -h localhost -U postgres -d cyberops -c "CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE app_api_login LOGIN PASSWORD 'app_runtime' NOSUPERUSER NOBYPASSRLS; GRANT app_runtime TO app_api_login"
           uv run alembic upgrade head
           uv run alembic downgrade base
           uv run pytest

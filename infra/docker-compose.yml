@@ -29,7 +29,7 @@ services:
       dockerfile: Dockerfile
     command: ["uv", "run", "alembic", "upgrade", "head"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://app_runtime:app_runtime@postgres:5432/cyberops
+      DATABASE_URL: postgresql+asyncpg://app_api_login:app_runtime@postgres:5432/cyberops
       DDL_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cyberops
       JWT_SECRET: development-only-secret
       TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
@@ -45,7 +45,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgresql+asyncpg://app_runtime:app_runtime@postgres:5432/cyberops
+      DATABASE_URL: postgresql+asyncpg://app_api_login:app_runtime@postgres:5432/cyberops
       DDL_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cyberops
       JWT_SECRET: development-only-secret
       TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
@@ -63,7 +63,7 @@ services:
       dockerfile: Dockerfile
     command: ["uv", "run", "python", "-m", "app.seed"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://app_runtime:app_runtime@postgres:5432/cyberops
+      DATABASE_URL: postgresql+asyncpg://app_api_login:app_runtime@postgres:5432/cyberops
       DDL_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/cyberops
       JWT_SECRET: development-only-secret
       TOTP_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef

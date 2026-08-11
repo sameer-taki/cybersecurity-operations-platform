@@ -6,6 +6,57 @@ intentionally deferred to their roadmap phases.
 
 from alembic import op
 
+
+def _execute_script(script: str) -> None:
+    statement: list[str] = []
+    quote: str | None = None
+    dollar_tag: str | None = None
+    index = 0
+    while index < len(script):
+        if dollar_tag is not None:
+            if script.startswith(dollar_tag, index):
+                statement.append(dollar_tag)
+                index += len(dollar_tag)
+                dollar_tag = None
+            else:
+                statement.append(script[index])
+                index += 1
+            continue
+        if quote is not None:
+            statement.append(script[index])
+            if script[index] == quote:
+                if index + 1 < len(script) and script[index + 1] == quote:
+                    statement.append(script[index + 1])
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if script[index] in ("'", '"'):
+            quote = script[index]
+            statement.append(script[index])
+            index += 1
+            continue
+        if script[index] == "$":
+            end = script.find("$", index + 1)
+            if end > index:
+                dollar_tag = script[index : end + 1]
+                statement.append(dollar_tag)
+                index = end + 1
+                continue
+        if script[index] == ";":
+            sql = "".join(statement).strip()
+            if sql:
+                op.execute(sql)
+            statement = []
+        else:
+            statement.append(script[index])
+        index += 1
+    sql = "".join(statement).strip()
+    if sql:
+        op.execute(sql)
+
+
 revision = "0001_secure_foundation"
 down_revision = None
 branch_labels = None
@@ -13,12 +64,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
+    _execute_script(
         """
         CREATE EXTENSION IF NOT EXISTS pgcrypto;
         CREATE EXTENSION IF NOT EXISTS citext;
         DO $$ BEGIN
-          CREATE ROLE app_runtime LOGIN NOSUPERUSER NOBYPASSRLS;
+          CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
         EXCEPTION WHEN duplicate_object THEN NULL; END $$;
         DO $$ BEGIN
           CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS;
@@ -148,6 +199,8 @@ def upgrade() -> None:
         CREATE POLICY tenant_isolation ON tenants
           USING (id = current_setting('app.current_tenant', true)::uuid)
           WITH CHECK (id = current_setting('app.current_tenant', true)::uuid);
+        CREATE POLICY platform_admin_tenant_registry ON tenants TO platform_admin
+          USING (true) WITH CHECK (true);
         DO $$
         DECLARE table_name text;
         BEGIN
@@ -173,30 +226,57 @@ def upgrade() -> None:
               );
             EXCEPTION WHEN duplicate_object THEN NULL;
             END;
+            EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I TO app_runtime', table_name);
           END LOOP;
         END $$;
         REVOKE ALL ON tenants FROM app_runtime;
+        GRANT SELECT ON permissions TO app_runtime;
         GRANT SELECT,INSERT,UPDATE,DELETE ON tenants TO platform_admin;
-        GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO app_runtime;
-        REVOKE ALL ON tenants FROM app_runtime;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON
+          users, roles, role_permissions, role_assignments, api_keys,
+          identity_providers, connectors, connector_health, raw_event_refs,
+          events, parsers, totp_secrets, refresh_tokens, audit_log,
+          retention_policies TO app_runtime;
         GRANT SELECT,INSERT ON audit_log TO app_runtime;
         REVOKE UPDATE,DELETE ON audit_log FROM app_runtime;
         REVOKE UPDATE,DELETE ON audit_log FROM PUBLIC;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public
+          GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public
+          GRANT SELECT ON TABLES TO app_runtime;
         DO $$
         BEGIN
           IF EXISTS (
             SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner
-            WHERE r.rolname = 'app_runtime' AND c.relkind IN ('r','p')
-          ) THEN RAISE EXCEPTION 'app_runtime must not own application tables'; END IF;
-          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime' AND (rolsuper OR rolbypassrls))
-          THEN RAISE EXCEPTION 'app_runtime must not be superuser or bypass RLS'; END IF;
+            WHERE r.rolname IN ('app_runtime', 'platform_admin')
+              AND c.relkind IN ('r','p','v','m','f')
+          ) THEN RAISE EXCEPTION 'service group roles must not own application objects'; END IF;
+          IF EXISTS (
+            SELECT 1 FROM pg_roles
+            WHERE rolname IN ('app_runtime', 'platform_admin')
+              AND (rolsuper OR rolbypassrls)
+          ) THEN RAISE EXCEPTION 'service group roles must not be superuser or bypass RLS'; END IF;
         END $$;
+        CREATE OR REPLACE FUNCTION assert_connecting_role()
+        RETURNS void LANGUAGE plpgsql SECURITY INVOKER AS $fn$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM pg_roles
+            WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+          ) THEN RAISE EXCEPTION 'connecting role must not be superuser or bypass RLS'; END IF;
+          IF EXISTS (
+            SELECT 1 FROM pg_class
+            WHERE relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+              AND relkind IN ('r','p','v','m','f')
+          ) THEN RAISE EXCEPTION 'connecting role must not own application objects'; END IF;
+        END $fn$;
+        GRANT EXECUTE ON FUNCTION assert_connecting_role() TO app_runtime, platform_admin;
         """
     )
 
 
 def downgrade() -> None:
-    op.execute(
+    _execute_script(
         """
         DROP TABLE IF EXISTS retention_policies, audit_log, refresh_tokens, totp_secrets,
           parsers, events, raw_event_refs, connector_health, connectors,

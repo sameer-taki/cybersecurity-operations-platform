@@ -329,6 +329,118 @@ async def test_ambiguous_email_requires_tenant_slug(
         await authenticate(email, "not-the-password", None, None)
 
 
+async def test_login_failures_commit_lockout_audit_and_reset(
+    security_data: tuple[str, str, AsyncEngine, AsyncEngine],
+) -> None:
+    tenant_a, _tenant_b, _runtime, owner = security_data
+    from app.audit import verify_audit_chain
+    from app.auth import auth_sessions, authenticate
+    from app.security import hash_password
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    bind = auth_sessions.kw.get("bind")
+    if isinstance(bind, AsyncEngine):
+        await bind.dispose()
+    email = "lockout@example.com"
+    password = "LockoutPassword-123!"
+    async with owner.begin() as connection:
+        user_id = uuid4()
+        await connection.execute(
+            text(
+                "INSERT INTO users (id,tenant_id,email,display_name,password_hash) "
+                "VALUES (:id,:tenant,:email,'Lockout',:password)"
+            ),
+            {
+                "id": user_id,
+                "tenant": tenant_a,
+                "email": email,
+                "password": hash_password(password),
+            },
+        )
+    for _ in range(5):
+        with pytest.raises(ValueError, match="invalid credentials"):
+            await authenticate(email, "wrong-password", None, f"security-a-{tenant_a[:8]}")
+    async with owner.connect() as connection:
+        state = await connection.execute(
+            text("SELECT failed_login_count, locked_until FROM users WHERE id = :user"),
+            {"user": user_id},
+        )
+        failed_count, locked_until = state.one()
+        assert failed_count == 5
+        assert locked_until is not None
+        audit_count = await connection.execute(
+            text(
+                "SELECT count(*) FROM audit_log "
+                "WHERE tenant_id = :tenant AND actor_id = :user AND action = 'auth.login_failed'"
+            ),
+            {"tenant": tenant_a, "user": user_id},
+        )
+        assert audit_count.scalar_one() == 5
+    with pytest.raises(ValueError, match="account unavailable"):
+        await authenticate(email, password, None, f"security-a-{tenant_a[:8]}")
+    async with owner.begin() as connection:
+        await connection.execute(
+            text("UPDATE users SET locked_until = NULL WHERE id = :user"),
+            {"user": user_id},
+        )
+    pair = await authenticate(email, password, None, f"security-a-{tenant_a[:8]}")
+    assert pair.access_token
+    async with owner.connect() as connection:
+        state = await connection.execute(
+            text("SELECT failed_login_count, locked_until FROM users WHERE id = :user"),
+            {"user": user_id},
+        )
+        failed_count, locked_until = state.one()
+        assert failed_count == 0
+        assert locked_until is None
+    owner_sessions = async_sessionmaker(owner, expire_on_commit=False)
+    async with owner_sessions() as session:
+        assert await verify_audit_chain(session, UUID(tenant_a))
+
+
+async def test_disabled_login_denial_is_audited(
+    security_data: tuple[str, str, AsyncEngine, AsyncEngine],
+) -> None:
+    tenant_a, _tenant_b, _runtime, owner = security_data
+    from app.audit import verify_audit_chain
+    from app.auth import auth_sessions, authenticate
+    from app.security import hash_password
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    bind = auth_sessions.kw.get("bind")
+    if isinstance(bind, AsyncEngine):
+        await bind.dispose()
+    email = "disabled@example.com"
+    user_id = uuid4()
+    async with owner.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO users (id,tenant_id,email,display_name,password_hash,disabled_at) "
+                "VALUES (:id,:tenant,:email,'Disabled',:password,now())"
+            ),
+            {
+                "id": user_id,
+                "tenant": tenant_a,
+                "email": email,
+                "password": hash_password("DisabledPassword-123!"),
+            },
+        )
+    with pytest.raises(ValueError, match="account unavailable"):
+        await authenticate(email, "DisabledPassword-123!", None, f"security-a-{tenant_a[:8]}")
+    async with owner.connect() as connection:
+        result = await connection.execute(
+            text(
+                "SELECT count(*) FROM audit_log "
+                "WHERE tenant_id = :tenant AND actor_id = :user AND action = 'auth.login_denied'"
+            ),
+            {"tenant": tenant_a, "user": user_id},
+        )
+        assert result.scalar_one() == 1
+    owner_sessions = async_sessionmaker(owner, expire_on_commit=False)
+    async with owner_sessions() as session:
+        assert await verify_audit_chain(session, UUID(tenant_a))
+
+
 async def test_api_key_scope_ip_and_revocation(
     security_data: tuple[str, str, AsyncEngine, AsyncEngine],
 ) -> None:

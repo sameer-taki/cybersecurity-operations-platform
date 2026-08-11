@@ -19,13 +19,11 @@ jobs:
           --health-interval 3s --health-timeout 3s --health-retries 20
       minio:
         image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+        command: server /data
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
         ports: ["9000:9000"]
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 3s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,8 +47,13 @@ jobs:
           export S3_BUCKET=cyberops-raw
           export REDIS_URL=redis://localhost:6379/0
           PGPASSWORD=postgres psql -h localhost -U postgres -d cyberops -c "CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE app_api_login LOGIN PASSWORD 'app_runtime' NOSUPERUSER NOBYPASSRLS; GRANT app_runtime TO app_api_login"
+          for attempt in {1..30}; do
+            curl -fsS http://localhost:9000/minio/health/live >/dev/null && break
+            sleep 1
+          done
           uv run alembic upgrade head
           uv run alembic downgrade base
+          uv run alembic upgrade head
           uv run pytest
       - run: uv run pip-audit --strict
       - run: docker build -t cyberops-ci .

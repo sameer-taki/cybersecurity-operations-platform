@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @dataclass(frozen=True)
 class Principal:
-    user_id: UUID
+    user_id: UUID | None
     tenant_id: UUID
     permissions: frozenset[str]
     attributes: dict[str, object]
+    key_id: UUID | None = None
 
 
 def requires(permission: str) -> object:

@@ -39,6 +39,9 @@ jobs:
       - run: |
           export DATABASE_URL=postgresql+asyncpg://app_api_login:app_runtime@localhost:5432/cyberops
           export DDL_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/cyberops
+          export SECURITY_DATABASE_URL="$DATABASE_URL"
+          export SECURITY_OWNER_DATABASE_URL="$DDL_DATABASE_URL"
+          export REQUIRE_SECURITY_TESTS=1
           export JWT_SECRET=ci-secret
           export TOTP_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
           export S3_ENDPOINT=http://localhost:9000
@@ -54,7 +57,7 @@ jobs:
           uv run alembic upgrade head
           uv run alembic downgrade base
           uv run alembic upgrade head
-          uv run pytest
+          uv run pytest -q
       - run: uv run pip-audit --strict
       - run: docker build -t cyberops-ci .
       - run: cp .env.example .env && docker compose -f infra/docker-compose.yml config

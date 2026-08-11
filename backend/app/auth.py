@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -14,6 +15,7 @@ from app.security import (
     verify_password,
     verify_totp,
 )
+from jwt import PyJWTError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,10 +54,10 @@ async def authenticate(
             user = row.mappings().first()
             now = datetime.now(UTC)
             if user is None:
-                verify_password(password, DUMMY_PASSWORD_HASH)
+                await asyncio.to_thread(verify_password, password, DUMMY_PASSWORD_HASH)
                 raise ValueError("invalid credentials")
             if bool(user["tenant_required"]):
-                verify_password(password, DUMMY_PASSWORD_HASH)
+                await asyncio.to_thread(verify_password, password, DUMMY_PASSWORD_HASH)
                 raise ValueError("tenant required")
             user_id = UUID(str(user["user_id"]))
             tenant_id = UUID(str(user["tenant_id"]))
@@ -72,10 +74,13 @@ async def authenticate(
                 raise ValueError("invalid credentials")
             locked_until = user["locked_until"]
             if user["disabled_at"] is not None or (locked_until is not None and locked_until > now):
+                await asyncio.to_thread(verify_password, password, DUMMY_PASSWORD_HASH)
                 await append_audit(session, tenant_id, user_id, "auth.login_denied", "user", str(user_id), {})
                 failure = "account unavailable"
             if failure is None:
-                valid = user["password_hash"] is not None and verify_password(password, str(user["password_hash"]))
+                valid = user["password_hash"] is not None and await asyncio.to_thread(
+                    verify_password, password, str(user["password_hash"])
+                )
                 recovery_hashes: list[str] = []
                 if user["mfa_enabled"] and valid:
                     secret_row = await session.execute(
@@ -87,7 +92,7 @@ async def authenticate(
                         valid = False
                     else:
                         decrypted = decrypt_totp_secret(str(secret["encrypted_secret"]))
-                        valid = verify_totp(decrypted, totp_code)
+                        valid = await asyncio.to_thread(verify_totp, decrypted, totp_code)
                         recovery_hashes = [str(item) for item in (secret["recovery_code_hashes"] or [])]
                         recovery_hash = hash_token(totp_code)
                         if not valid and recovery_hash in recovery_hashes:
@@ -115,7 +120,7 @@ async def authenticate(
                 )
                 permissions = await session.execute(
                     text(
-                        "SELECT DISTINCT p.key FROM permissions p "
+                        "SELECT DISTINCT p.key, ra.attributes FROM permissions p "
                         "JOIN role_permissions rp ON rp.permission_id = p.id "
                         "JOIN role_assignments ra ON ra.role_id = rp.role_id AND ra.tenant_id = rp.tenant_id "
                         "WHERE ra.user_id = :user AND ra.tenant_id = :tenant"
@@ -123,6 +128,9 @@ async def authenticate(
                     {"user": user_id, "tenant": tenant_id},
                 )
                 permission_keys = [str(item[0]) for item in permissions]
+                attributes: dict[str, object] = {}
+                for item in permissions:
+                    attributes.update(dict(item[1] or {}))
                 family_id = uuid4()
                 refresh, expires_at = issue_refresh_token(user_id, tenant_id, family_id)
                 await session.execute(
@@ -140,7 +148,7 @@ async def authenticate(
                     },
                 )
                 await append_audit(session, tenant_id, user_id, "auth.login_succeeded", "user", str(user_id), {})
-                pair = TokenPair(issue_access_token(user_id, tenant_id, permission_keys), refresh)
+                pair = TokenPair(issue_access_token(user_id, tenant_id, permission_keys, attributes), refresh)
         if failure is not None:
             raise ValueError(failure)
         if pair is None:
@@ -149,7 +157,10 @@ async def authenticate(
 
 
 async def rotate_refresh_token(token: str) -> TokenPair:
-    claims = decode_token(token, "refresh")
+    try:
+        claims = decode_token(token, "refresh")
+    except PyJWTError as exc:
+        raise ValueError("invalid refresh token") from exc
     user_id = UUID(str(claims["sub"]))
     tenant_id = UUID(str(claims["tenant_id"]))
     family_id = UUID(str(claims["family_id"]))
@@ -160,7 +171,8 @@ async def rotate_refresh_token(token: str) -> TokenPair:
             await _set_tenant(session, tenant_id)
             result = await session.execute(
                 text(
-                    "SELECT id, used_at, revoked_at, expires_at FROM refresh_tokens "
+                    "SELECT rt.id, rt.used_at, rt.revoked_at, rt.expires_at, u.disabled_at FROM refresh_tokens rt "
+                    "JOIN users u ON u.id = rt.user_id AND u.tenant_id = rt.tenant_id "
                     "WHERE token_hash = :token AND family_id = :family FOR UPDATE"
                 ),
                 {"token": hash_token(token), "family": family_id},
@@ -169,6 +181,7 @@ async def rotate_refresh_token(token: str) -> TokenPair:
             now = datetime.now(UTC)
             if (
                 stored is None
+                or stored["disabled_at"] is not None
                 or stored["used_at"] is not None
                 or stored["revoked_at"] is not None
                 or stored["expires_at"] <= now
@@ -186,16 +199,20 @@ async def rotate_refresh_token(token: str) -> TokenPair:
                     text("UPDATE refresh_tokens SET used_at = :now WHERE id = :id"),
                     {"now": now, "id": stored["id"]},
                 )
-                permission_rows = await session.execute(
+                permission_result = await session.execute(
                     text(
-                        "SELECT DISTINCT p.key FROM permissions p "
+                        "SELECT DISTINCT p.key, ra.attributes FROM permissions p "
                         "JOIN role_permissions rp ON rp.permission_id = p.id "
                         "JOIN role_assignments ra ON ra.role_id = rp.role_id AND ra.tenant_id = rp.tenant_id "
                         "WHERE ra.user_id = :user AND ra.tenant_id = :tenant"
                     ),
                     {"user": user_id, "tenant": tenant_id},
                 )
+                permission_rows = permission_result.all()
                 permissions = [str(item[0]) for item in permission_rows]
+                attributes: dict[str, object] = {}
+                for item in permission_rows:
+                    attributes.update(dict(item[1] or {}))
                 new_refresh, expires_at = issue_refresh_token(user_id, tenant_id, family_id)
                 await session.execute(
                     text(
@@ -214,7 +231,7 @@ async def rotate_refresh_token(token: str) -> TokenPair:
                 await append_audit(
                     session, tenant_id, user_id, "auth.refresh_rotated", "token_family", str(family_id), {}
                 )
-                pair = TokenPair(issue_access_token(user_id, tenant_id, permissions), new_refresh)
+                pair = TokenPair(issue_access_token(user_id, tenant_id, permissions, attributes), new_refresh)
         if reuse_detected:
             raise ValueError("refresh token reuse detected")
         if pair is None:
@@ -223,7 +240,10 @@ async def rotate_refresh_token(token: str) -> TokenPair:
 
 
 async def logout(token: str) -> None:
-    claims = decode_token(token, "refresh")
+    try:
+        claims = decode_token(token, "refresh")
+    except PyJWTError as exc:
+        raise ValueError("invalid refresh token") from exc
     family_id = UUID(str(claims["family_id"]))
     user_id = UUID(str(claims["sub"]))
     tenant_id = UUID(str(claims["tenant_id"]))

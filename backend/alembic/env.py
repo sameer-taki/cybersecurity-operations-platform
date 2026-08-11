@@ -2,7 +2,6 @@ from logging.config import fileConfig
 
 from alembic import context
 from app.config import get_settings
-from app.models import Base
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -12,7 +11,10 @@ config.set_main_option("sqlalchemy.url", get_settings().ddl_database_url.replace
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = Base.metadata
+# Migrations are hand-written SQL and the runtime uses SQL directly. Keeping
+# incomplete ORM metadata here would make autogenerate propose destructive
+# changes, so schema diffs must be authored as migrations.
+target_metadata = None
 
 
 def run_migrations_offline() -> None:

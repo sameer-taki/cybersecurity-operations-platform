@@ -4,6 +4,8 @@ Detection, case-management, AI, response-action, and reporting tables are
 intentionally deferred to their roadmap phases.
 """
 
+import re
+
 from alembic import op
 
 
@@ -38,11 +40,11 @@ def _execute_script(script: str) -> None:
             index += 1
             continue
         if script[index] == "$":
-            end = script.find("$", index + 1)
-            if end > index:
-                dollar_tag = script[index : end + 1]
+            match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", script[index:])
+            if match:
+                dollar_tag = match.group(0)
                 statement.append(dollar_tag)
-                index = end + 1
+                index += len(dollar_tag)
                 continue
         if script[index] == ";":
             sql = "".join(statement).strip()
@@ -294,5 +296,6 @@ def downgrade() -> None:
           permissions, roles, users, tenants CASCADE;
         DROP TYPE IF EXISTS outcome;
         DROP TYPE IF EXISTS severity;
+        DROP FUNCTION IF EXISTS assert_connecting_role();
         """
     )

@@ -17,6 +17,7 @@ from app.security import (
     decrypt_totp_secret,
     encrypt_totp_secret,
     hash_password,
+    ip_allowed,
     issue_access_token,
     new_api_key,
     new_totp_secret,
@@ -61,6 +62,11 @@ def test_event_dedup_and_tenant_uri() -> None:
     uri = raw_object_uri(tenant_id, observed, "evt-1")
     assert validate_raw_object_uri(uri, tenant_id)
     assert not validate_raw_object_uri(uri, uuid4())
+    assert not validate_raw_object_uri(f"object://raw/{tenant_id}/2026/08/11/../secret", tenant_id)
+
+
+def test_ip_allowlist_rejects_unparseable_addresses() -> None:
+    assert not ip_allowed("not-an-ip", ["10.0.0.0/8"])
 
 
 def test_rbac_attribute_conditions_match_and_deny() -> None:

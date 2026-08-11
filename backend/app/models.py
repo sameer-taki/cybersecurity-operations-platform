@@ -132,9 +132,14 @@ class RawEventRef(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"))
     event_id: Mapped[str] = mapped_column(String(255))
-    object_uri: Mapped[str] = mapped_column(Text())
+    object_uri: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    quarantine_uri: Mapped[str | None] = mapped_column(Text(), nullable=True)
     sha256: Mapped[str] = mapped_column(String(64))
     byte_length: Mapped[int | None] = mapped_column(Integer)
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retention_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    legal_hold: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuditLog(Base):

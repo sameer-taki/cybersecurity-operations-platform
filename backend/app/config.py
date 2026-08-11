@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     s3_secret_key: str = Field(alias="S3_SECRET_KEY")
     s3_bucket: str = Field(alias="S3_BUCKET")
     redis_url: str = Field(alias="REDIS_URL")
+    trusted_proxy: str | None = Field(default=None, alias="TRUSTED_PROXY")
 
 
 @lru_cache

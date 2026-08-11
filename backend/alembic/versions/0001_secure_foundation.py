@@ -69,11 +69,15 @@ def upgrade() -> None:
         CREATE EXTENSION IF NOT EXISTS pgcrypto;
         CREATE EXTENSION IF NOT EXISTS citext;
         DO $$ BEGIN
-          CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
-        EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime') THEN
+            CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
+          END IF;
+        END $$;
         DO $$ BEGIN
-          CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS;
-        EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platform_admin') THEN
+            CREATE ROLE platform_admin NOLOGIN NOSUPERUSER NOBYPASSRLS;
+          END IF;
+        END $$;
         CREATE TYPE severity AS ENUM ('low','medium','high','critical');
         CREATE TYPE outcome AS ENUM ('success','failure','unknown');
 
@@ -133,7 +137,12 @@ def upgrade() -> None:
         );
         CREATE TABLE raw_event_refs (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id),
-          event_id text NOT NULL, object_uri text NOT NULL, sha256 char(64) NOT NULL,
+          event_id text NOT NULL,
+          object_uri text NOT NULL CHECK (
+            object_uri ~ ('^object://raw/' || tenant_id::text ||
+              '/[0-9]{4}/[0-9]{2}/[0-9]{2}/[^/]+$')
+          ),
+          sha256 char(64) NOT NULL,
           byte_length bigint, retention_until timestamptz, legal_hold boolean NOT NULL DEFAULT false,
           created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(tenant_id,event_id)
         );
@@ -157,10 +166,6 @@ def upgrade() -> None:
             to_char(start_date, 'YYYY_MM'), start_date, (start_date + interval '1 month')::date
           );
         END $$;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public
-          GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public
-          GRANT SELECT ON TABLES TO app_runtime;
         CREATE TABLE parsers (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id),
           name text NOT NULL, version text NOT NULL, source_kind text NOT NULL,
@@ -238,12 +243,12 @@ def upgrade() -> None:
         GRANT SELECT,INSERT,UPDATE,DELETE ON tenants TO platform_admin;
         GRANT SELECT, INSERT, UPDATE, DELETE ON
           users, roles, role_permissions, role_assignments, api_keys,
-          identity_providers, connectors, connector_health, raw_event_refs,
-          events, parsers, totp_secrets, refresh_tokens, audit_log,
+          identity_providers, connectors, connector_health,
+          events, parsers, totp_secrets, refresh_tokens,
           retention_policies TO app_runtime;
-        GRANT SELECT,INSERT ON audit_log TO app_runtime;
+        GRANT SELECT, INSERT ON raw_event_refs TO app_runtime;
+        GRANT SELECT, INSERT ON audit_log TO app_runtime;
         REVOKE UPDATE,DELETE ON audit_log FROM app_runtime;
-        REVOKE UPDATE,DELETE ON audit_log FROM PUBLIC;
         DO $$
         BEGIN
           IF EXISTS (
@@ -252,17 +257,22 @@ def upgrade() -> None:
               AND c.relkind IN ('r','p','v','m','f')
           ) THEN RAISE EXCEPTION 'service group roles must not own application objects'; END IF;
           IF EXISTS (
-            SELECT 1 FROM pg_roles
-            WHERE rolname IN ('app_runtime', 'platform_admin')
-              AND (rolsuper OR rolbypassrls)
+            SELECT 1 FROM pg_roles r
+            WHERE (r.rolsuper OR r.rolbypassrls)
+              AND EXISTS (
+                SELECT 1 FROM pg_roles g
+                WHERE g.rolname IN ('app_runtime', 'platform_admin')
+                  AND pg_has_role(g.oid, r.oid, 'member')
+              )
           ) THEN RAISE EXCEPTION 'service group roles must not be superuser or bypass RLS'; END IF;
         END $$;
         CREATE OR REPLACE FUNCTION assert_connecting_role()
         RETURNS void LANGUAGE plpgsql SECURITY INVOKER AS $fn$
         BEGIN
           IF EXISTS (
-            SELECT 1 FROM pg_roles
-            WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+            SELECT 1 FROM pg_roles r
+            WHERE (r.rolsuper OR r.rolbypassrls)
+              AND (r.rolname = current_user OR pg_has_role(current_user, r.oid, 'member'))
           ) THEN RAISE EXCEPTION 'connecting role must not be superuser or bypass RLS'; END IF;
           IF EXISTS (
             SELECT 1 FROM pg_class

@@ -25,6 +25,8 @@ pytestmark = pytest.mark.skipif(
     not DATABASE_URL or not OWNER_DATABASE_URL,
     reason="set SECURITY_DATABASE_URL and SECURITY_OWNER_DATABASE_URL for PostgreSQL security tests",
 )
+if os.environ.get("REQUIRE_SECURITY_TESTS") == "1" and (not DATABASE_URL or not OWNER_DATABASE_URL):
+    raise RuntimeError("REQUIRE_SECURITY_TESTS=1 requires SECURITY_DATABASE_URL and SECURITY_OWNER_DATABASE_URL")
 
 
 @pytest.fixture

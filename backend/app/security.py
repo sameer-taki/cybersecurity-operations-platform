@@ -62,13 +62,16 @@ def hash_token(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def issue_access_token(user_id: UUID, tenant_id: UUID, permissions: list[str]) -> str:
+def issue_access_token(
+    user_id: UUID, tenant_id: UUID, permissions: list[str], attributes: dict[str, object] | None = None
+) -> str:
     settings = get_settings()
     now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "tenant_id": str(tenant_id),
         "permissions": permissions,
+        "attributes": attributes or {},
         "iat": now,
         "exp": now + timedelta(minutes=settings.jwt_access_minutes),
         "iss": settings.jwt_issuer,
@@ -109,8 +112,14 @@ def new_api_key() -> tuple[str, str, str]:
 def ip_allowed(address: str, allowlist: list[str] | None) -> bool:
     if not allowlist:
         return True
-    candidate = ip_address(address)
-    return any(
-        candidate in ip_network(str(item)) if "/" in str(item) else candidate == ip_address(str(item))
-        for item in allowlist
-    )
+    try:
+        candidate = ip_address(address)
+    except ValueError:
+        return False
+    for item in allowlist:
+        try:
+            if candidate in ip_network(str(item)) if "/" in str(item) else candidate == ip_address(str(item)):
+                return True
+        except ValueError:
+            continue
+    return False

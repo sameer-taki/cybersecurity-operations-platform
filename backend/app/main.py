@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from app.event_contract import event_json_schema
 from app.logging_redaction import SecretRedactionFilter
 from app.rbac import Principal, attributes_match
 from app.security import (
+    decrypt_totp_secret,
     encrypt_totp_secret,
     hash_password,
     hash_token,
@@ -20,10 +22,14 @@ from app.security import (
     new_api_key,
     new_totp_secret,
     recovery_codes,
+    verify_totp,
 )
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from jwt import PyJWTError
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -60,14 +66,33 @@ class ApiKeyCreateRequest(BaseModel):
     ip_allowlist: list[str] | None = None
 
 
+class MfaConfirmationRequest(BaseModel):
+    secret: str
+    confirmation_code: str = Field(min_length=6, max_length=8)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    if settings.app_env.lower() not in {"development", "test"} and (
+        settings.jwt_secret == "development-only-secret"
+        or settings.totp_encryption_key == "0123456789abcdef0123456789abcdef"
+    ):
+        raise RuntimeError("refusing to start with development secrets outside a development environment")
     root_logger = logging.getLogger()
-    root_logger.addFilter(SecretRedactionFilter([get_settings().jwt_secret, get_settings().totp_encryption_key]))
+    root_logger.addFilter(SecretRedactionFilter([settings.jwt_secret, settings.totp_encryption_key]))
     yield
 
 
 app = FastAPI(title="Fiji & Pacific Cyber Operations Platform", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(_request: object, _exc: IntegrityError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": "request conflicts with existing data"},
+    )
 
 
 @app.post("/api/v1/auth/mfa/setup")
@@ -77,9 +102,14 @@ async def setup_mfa(
     session, principal = session_and_principal
     secret = new_totp_secret()
     codes = recovery_codes()
+    current = await session.execute(
+        text("SELECT mfa_enabled FROM users WHERE id = :user FOR UPDATE"), {"user": principal.user_id}
+    )
+    if current.scalar_one_or_none() is None or current.scalar():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is already enabled")
     await session.execute(
         text(
-            "INSERT INTO totp_secrets (user_id,tenant_id,encrypted_secret,recovery_code_hashes) "
+            "INSERT INTO totp_enrollments (user_id,tenant_id,encrypted_secret,recovery_code_hashes) "
             "VALUES (:user,:tenant,:secret,:codes) "
             "ON CONFLICT (user_id) DO UPDATE SET encrypted_secret = EXCLUDED.encrypted_secret, "
             "recovery_code_hashes = EXCLUDED.recovery_code_hashes"
@@ -91,11 +121,67 @@ async def setup_mfa(
             "codes": [hash_token(code) for code in codes],
         },
     )
+    await append_audit(
+        session,
+        principal.tenant_id,
+        principal.user_id,
+        "auth.mfa_enrollment_started",
+        "user",
+        str(principal.user_id),
+        {},
+    )
+    return {"secret": secret, "recovery_codes": codes, "confirmed": False}
+
+
+@app.post("/api/v1/auth/mfa/confirm")
+async def confirm_mfa(
+    request: MfaConfirmationRequest,
+    session_and_principal: tuple[AsyncSession, Principal] = Depends(tenant_session),
+) -> dict[str, object]:
+    session, principal = session_and_principal
+    if principal.user_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid MFA confirmation")
+    pending = await session.execute(
+        text("SELECT encrypted_secret, recovery_code_hashes FROM totp_enrollments WHERE user_id = :user FOR UPDATE"),
+        {"user": principal.user_id},
+    )
+    pending_row = pending.mappings().first()
+    if pending_row is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid MFA confirmation")
+    pending_secret = decrypt_totp_secret(str(pending_row["encrypted_secret"]))
+    if request.secret != pending_secret or not await asyncio.to_thread(
+        verify_totp, pending_secret, request.confirmation_code
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid MFA confirmation")
+    current = await session.execute(
+        text("SELECT mfa_enabled FROM users WHERE id = :user FOR UPDATE"), {"user": principal.user_id}
+    )
+    if current.scalar_one_or_none() is None or current.scalar_one():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is already enabled")
+    await session.execute(
+        text(
+            "INSERT INTO totp_secrets (user_id,tenant_id,encrypted_secret,recovery_code_hashes) "
+            "VALUES (:user,:tenant,:secret,:codes)"
+        ),
+        {
+            "user": principal.user_id,
+            "tenant": principal.tenant_id,
+            "secret": encrypt_totp_secret(request.secret),
+            "codes": list(pending_row["recovery_code_hashes"] or []),
+        },
+    )
+    await session.execute(text("DELETE FROM totp_enrollments WHERE user_id = :user"), {"user": principal.user_id})
     await session.execute(text("UPDATE users SET mfa_enabled = true WHERE id = :user"), {"user": principal.user_id})
     await append_audit(
-        session, principal.tenant_id, principal.user_id, "auth.mfa_enabled", "user", str(principal.user_id), {}
+        session,
+        principal.tenant_id,
+        principal.user_id,
+        "auth.mfa_enrollment_confirmed",
+        "user",
+        str(principal.user_id),
+        {},
     )
-    return {"secret": secret, "recovery_codes": codes}
+    return {"enabled": True}
 
 
 @app.get("/health")
@@ -132,8 +218,8 @@ async def login(request: LoginRequest) -> dict[str, str]:
 async def refresh(request: TokenRequest) -> dict[str, str]:
     try:
         tokens = await rotate_refresh_token(request.refresh_token)
-    except (ValueError, KeyError, TypeError) as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from None
+    except (ValueError, KeyError, TypeError, PyJWTError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid refresh token") from None
     return {
         "access_token": tokens.access_token,
         "refresh_token": tokens.refresh_token,
@@ -145,8 +231,8 @@ async def refresh(request: TokenRequest) -> dict[str, str]:
 async def logout_route(request: TokenRequest) -> None:
     try:
         await logout(request.refresh_token)
-    except (ValueError, KeyError, TypeError) as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid refresh token") from exc
+    except (ValueError, KeyError, TypeError, PyJWTError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid refresh token") from None
 
 
 async def require_tenant_admin(
@@ -207,7 +293,7 @@ async def invite_user(
             "tenant": principal.tenant_id,
             "email": request.email,
             "name": request.display_name,
-            "password": hash_password(request.password),
+            "password": await asyncio.to_thread(hash_password, request.password),
         },
     )
     await append_audit(
@@ -229,6 +315,10 @@ async def disable_user(
 ) -> None:
     session, _principal = session_and_principal
     await session.execute(text("UPDATE users SET disabled_at = now() WHERE id = :id"), {"id": user_id})
+    await session.execute(
+        text("UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = :id AND revoked_at IS NULL"),
+        {"id": user_id},
+    )
     await append_audit(
         session, _principal.tenant_id, _principal.user_id, "tenant.user_disabled", "user", str(user_id), {}
     )
@@ -315,6 +405,7 @@ async def revoke_api_key(
 async def api_key_principal(
     api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     client_ip: Annotated[str | None, Header(alias="X-Forwarded-For")] = None,
+    request: Request = None,  # type: ignore[assignment]
 ) -> Principal:
     if not api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key required")
@@ -330,9 +421,17 @@ async def api_key_principal(
                     text("SELECT set_config('app.current_tenant', :tenant, true)"),
                     {"tenant": str(row["tenant_id"])},
                 )
-        if row is None or (client_ip and not ip_allowed(client_ip.split(",")[0].strip(), row["ip_allowlist"])):
+        peer_ip = request.client.host if request is not None and request.client is not None else client_ip
+        settings = get_settings()
+        if request is not None and peer_ip and settings.trusted_proxy and ip_allowed(peer_ip, [settings.trusted_proxy]):
+            forwarded = request.headers.get("X-Forwarded-For")
+            if forwarded:
+                peer_ip = forwarded.split(",")[-1].strip()
+        if row is None or (
+            row["ip_allowlist"] is not None and (not peer_ip or not ip_allowed(peer_ip, row["ip_allowlist"]))
+        ):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid API key")
-        return Principal(UUID(str(row["key_id"])), UUID(str(row["tenant_id"])), frozenset(row["scopes"]), {})
+        return Principal(None, UUID(str(row["tenant_id"])), frozenset(row["scopes"]), {}, UUID(str(row["key_id"])))
 
 
 def require_api_scope(scope: str) -> object:
@@ -348,6 +447,21 @@ def require_api_scope(scope: str) -> object:
 
 @app.get("/api/v1/protected/events/summary")
 async def protected_event_summary(
-    _principal: Annotated[Principal, Depends(require_api_scope("events:read"))],
+    principal: Annotated[Principal, Depends(require_api_scope("events:read"))],
 ) -> dict[str, str]:
+    async with auth_sessions() as session:
+        async with session.begin():
+            await session.execute(
+                text("SELECT set_config('app.current_tenant', :tenant, true)"),
+                {"tenant": str(principal.tenant_id)},
+            )
+            await append_audit(
+                session,
+                principal.tenant_id,
+                None,
+                "api_key.events_summary",
+                "api_key",
+                str(principal.key_id),
+                {"api_key_id": str(principal.key_id)},
+            )
     return {"status": "api-key-protected"}

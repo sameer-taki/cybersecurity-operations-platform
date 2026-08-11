@@ -89,7 +89,7 @@ def dedup_key(
     return f"{tenant_id}:{connector_id}:{digest}:{bucket}"
 
 
-_URI = re.compile(r"^object://raw/([^/]+)/(\d{4})/(\d{2})/(\d{2})/([^/]+)$")
+_URI = re.compile(r"^object://raw/([^/]+)/(\d{4})/(\d{2})/(\d{2})/([A-Za-z0-9][A-Za-z0-9_.:-]*)$")
 
 
 def raw_object_uri(tenant_id: UUID, observed_at: datetime, event_id: str) -> str:
@@ -99,7 +99,13 @@ def raw_object_uri(tenant_id: UUID, observed_at: datetime, event_id: str) -> str
 
 def validate_raw_object_uri(uri: str, tenant_id: UUID) -> bool:
     match = _URI.fullmatch(uri)
-    return match is not None and match.group(1) == str(tenant_id)
+    if match is None or match.group(1) != str(tenant_id):
+        return False
+    try:
+        datetime.strptime("/".join(match.group(index) for index in (2, 3, 4)), "%Y/%m/%d")
+    except ValueError:
+        return False
+    return all(segment not in {".", ".."} and "\\" not in segment for segment in match.groups())
 
 
 def event_json_schema() -> dict[str, object]:

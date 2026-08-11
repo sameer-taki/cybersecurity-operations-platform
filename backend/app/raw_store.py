@@ -23,7 +23,12 @@ class LocalRawObjectStore:
 
     async def put(self, tenant_id: UUID, observed_at: datetime, event_id: str, content: bytes) -> str:
         uri = raw_object_uri(tenant_id, observed_at, event_id)
-        path = self.root / str(tenant_id) / observed_at.strftime("%Y/%m/%d") / event_id
+        if not validate_raw_object_uri(uri, tenant_id):
+            raise ValueError("invalid raw object identifier")
+        parts = uri.removeprefix("object://raw/").split("/")
+        path = self.root.joinpath(*parts)
+        if self.root.resolve() not in path.resolve().parents:
+            raise ValueError("raw object path escapes storage root")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return uri
@@ -33,6 +38,8 @@ class LocalRawObjectStore:
             raise PermissionError("raw object tenant mismatch")
         parts = uri.removeprefix("object://raw/").split("/")
         path = self.root.joinpath(*parts)
+        if self.root.resolve() not in path.resolve().parents:
+            raise PermissionError("raw object path escapes storage root")
         return path.read_bytes()
 
 
@@ -96,11 +103,18 @@ def observed_at_is_in_window(
 ) -> bool:
     current = (now or datetime.now(UTC)).astimezone(UTC)
     value = observed_at.astimezone(UTC)
-    return current - back_window <= value <= current + forward_window
+    month_start = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month_start.month == 12:
+        month_end = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        month_end = month_start.replace(month=month_start.month + 1)
+    return month_start <= value < month_end
 
 
 def quarantine_raw_object(root: Path, tenant_id: UUID, event_id: str, content: bytes) -> Path:
     path = root / "quarantine" / str(tenant_id) / event_id
+    if path.resolve().parent != (root / "quarantine" / str(tenant_id)).resolve():
+        raise ValueError("quarantine object path escapes storage root")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return path

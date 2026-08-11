@@ -21,7 +21,12 @@ async def append_audit(
         {"tenant": str(tenant_id)},
     )
     previous = await session.execute(
-        text("SELECT entry_hash FROM audit_log WHERE tenant_id = :tenant ORDER BY created_at DESC, id DESC LIMIT 1"),
+        text(
+            "SELECT entry_hash FROM audit_log a WHERE tenant_id = :tenant "
+            "AND NOT EXISTS (SELECT 1 FROM audit_log successor "
+            "WHERE successor.tenant_id = a.tenant_id AND successor.prev_hash = a.entry_hash) "
+            "LIMIT 1"
+        ),
         {"tenant": tenant_id},
     )
     prev_hash = previous.scalar_one_or_none()
@@ -65,24 +70,38 @@ async def append_audit(
 
 
 async def verify_audit_chain(session: AsyncSession, tenant_id: UUID) -> bool:
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:tenant, 0))"),
+        {"tenant": str(tenant_id)},
+    )
     rows = await session.execute(
         text(
-            "SELECT actor_id, action, resource_type, resource_id, metadata, prev_hash, entry_hash, created_at "
-            "FROM audit_log WHERE tenant_id = :tenant ORDER BY created_at, id"
+            "SELECT id, actor_id, action, resource_type, resource_id, metadata, prev_hash, entry_hash, created_at "
+            "FROM audit_log WHERE tenant_id = :tenant"
         ),
         {"tenant": tenant_id},
     )
+    entries = {str(row[0]): row[1:] for row in rows}
+    if not entries:
+        return True
+    roots = [entry_id for entry_id, row in entries.items() if row[5] is None]
+    if len(roots) != 1:
+        return False
+    current_id = roots[0]
     previous: str | None = None
-    for (
-        actor_id,
-        action,
-        resource_type,
-        resource_id,
-        metadata,
-        prev_hash,
-        entry_hash,
-        created_at,
-    ) in rows:
+    visited: set[str] = set()
+    while current_id not in visited:
+        visited.add(current_id)
+        (
+            actor_id,
+            action,
+            resource_type,
+            resource_id,
+            metadata,
+            prev_hash,
+            entry_hash,
+            created_at,
+        ) = entries[current_id]
         if prev_hash != previous:
             return False
         canonical = json.dumps(
@@ -102,4 +121,10 @@ async def verify_audit_chain(session: AsyncSession, tenant_id: UUID) -> bool:
         if hashlib.sha256(canonical.encode()).hexdigest() != entry_hash:
             return False
         previous = entry_hash
-    return True
+        successors = [entry_id for entry_id, row in entries.items() if row[5] == previous]
+        if len(successors) > 1:
+            return False
+        if not successors:
+            break
+        current_id = successors[0]
+    return len(visited) == len(entries)

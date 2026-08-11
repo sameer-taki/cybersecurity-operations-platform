@@ -85,7 +85,11 @@ async def seed() -> None:
                         "SELECT :tenant, u.id, r.id FROM users u "
                         "JOIN roles r ON r.tenant_id = u.tenant_id "
                         "WHERE u.tenant_id = :tenant AND r.name = 'tenant_admin' "
-                        "AND u.email = :email ON CONFLICT DO NOTHING"
+                        "AND u.email = :email "
+                        "AND NOT EXISTS ("
+                        "SELECT 1 FROM role_assignments existing "
+                        "WHERE existing.tenant_id = :tenant AND existing.user_id = u.id "
+                        "AND existing.role_id = r.id)"
                     ),
                     {"tenant": resolved_id, "email": f"admin{index}@example.com"},
                 )

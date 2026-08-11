@@ -6,6 +6,7 @@ from app.db import session_factory
 from app.rbac import Principal
 from app.security import decode_token
 from fastapi import Depends, Header, HTTPException, status
+from jwt import PyJWTError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,12 +20,15 @@ async def authenticated_principal(
         payload = decode_token(authorization.removeprefix("Bearer "), "access")
         user_id = UUID(str(payload["sub"]))
         tenant_id = UUID(str(payload["tenant_id"]))
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, PyJWTError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token") from None
     permissions_value = payload.get("permissions", [])
     if not isinstance(permissions_value, list) or not all(isinstance(item, str) for item in permissions_value):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token claims")
-    return Principal(user_id, tenant_id, frozenset(permissions_value), {})
+    attributes_value = payload.get("attributes", {})
+    if not isinstance(attributes_value, dict):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token claims")
+    return Principal(user_id, tenant_id, frozenset(permissions_value), attributes_value)
 
 
 async def platform_admin_access(
@@ -34,7 +38,7 @@ async def platform_admin_access(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
     try:
         payload = decode_token(authorization.removeprefix("Bearer "), "access")
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, PyJWTError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token") from None
     permissions_value = payload.get("permissions", [])
     if not isinstance(permissions_value, list) or "platform:admin" not in permissions_value:

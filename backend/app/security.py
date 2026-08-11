@@ -10,7 +10,7 @@ import jwt
 import pyotp
 from app.config import get_settings
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import VerificationError, VerifyMismatchError
 from cryptography.fernet import Fernet
 
 password_hasher: Final[PasswordHasher] = PasswordHasher(
@@ -25,7 +25,7 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, encoded: str) -> bool:
     try:
         return password_hasher.verify(encoded, password)
-    except VerifyMismatchError:
+    except (VerifyMismatchError, VerificationError):
         return False
 
 
@@ -83,6 +83,7 @@ def issue_refresh_token(user_id: UUID, tenant_id: UUID, family_id: UUID) -> tupl
         "family_id": str(family_id),
         "iat": datetime.now(UTC),
         "exp": expiry,
+        "iss": settings.jwt_issuer,
         "type": "refresh",
         "jti": str(uuid4()),
     }

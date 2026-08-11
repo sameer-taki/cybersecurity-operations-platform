@@ -157,6 +157,10 @@ def upgrade() -> None:
             to_char(start_date, 'YYYY_MM'), start_date, (start_date + interval '1 month')::date
           );
         END $$;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public
+          GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public
+          GRANT SELECT ON TABLES TO app_runtime;
         CREATE TABLE parsers (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id),
           name text NOT NULL, version text NOT NULL, source_kind text NOT NULL,
@@ -240,10 +244,6 @@ def upgrade() -> None:
         GRANT SELECT,INSERT ON audit_log TO app_runtime;
         REVOKE UPDATE,DELETE ON audit_log FROM app_runtime;
         REVOKE UPDATE,DELETE ON audit_log FROM PUBLIC;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public
-          GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public
-          GRANT SELECT ON TABLES TO app_runtime;
         DO $$
         BEGIN
           IF EXISTS (

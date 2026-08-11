@@ -31,6 +31,10 @@ async def ensure_event_partitions(engine: AsyncEngine, months_ahead: int = 3, ba
                         );
                         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', partition_name);
                         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', partition_name);
+                        EXECUTE format(
+                            'GRANT SELECT, INSERT, UPDATE, DELETE ON %I TO app_runtime',
+                            partition_name
+                        );
                         BEGIN
                             EXECUTE format(
                                 'CREATE POLICY tenant_isolation ON %I USING '

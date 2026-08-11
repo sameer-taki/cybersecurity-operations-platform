@@ -1,8 +1,11 @@
 -- Phase 0 review sketch. Alembic migrations will own executable DDL.
--- Deployment contract: migrations run as a separate DDL/owner role. Runtime
--- connects as app_runtime, which is NOSUPERUSER, NOBYPASSRLS, and owns no
--- table. The control-plane service uses platform_admin for tenant registry
--- access; app_runtime has no SELECT privilege on tenants.
+-- Deployment contract: migrations run as a separate DDL/owner role. The
+-- app_runtime and platform_admin roles are NOLOGIN group roles; deployment
+-- creates per-service LOGIN roles and grants membership (for example,
+-- GRANT app_runtime TO app_api_login). A connecting LOGIN role must be
+-- NOSUPERUSER, NOBYPASSRLS, and own no application objects. The control-plane
+-- service uses platform_admin for tenant-registry access; app_runtime has no
+-- SELECT privilege on tenants.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS citext;
 CREATE ROLE app_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
@@ -26,8 +29,9 @@ CREATE TABLE raw_event_refs (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tena
 
 CREATE TABLE events (tenant_id uuid NOT NULL REFERENCES tenants(id), event_id text NOT NULL, observed_at timestamptz NOT NULL, ingested_at timestamptz NOT NULL, source jsonb NOT NULL, actor jsonb NOT NULL, target jsonb NOT NULL, event_type text NOT NULL, severity severity NOT NULL, confidence numeric(4,3) CHECK(confidence BETWEEN 0 AND 1), action text, outcome outcome NOT NULL DEFAULT 'unknown', raw_event_ref text NOT NULL, parser_name text NOT NULL, parser_version text NOT NULL, raw_event_sha256 char(64) NOT NULL, retention_class text NOT NULL DEFAULT 'security_event', retention_until timestamptz, legal_hold boolean NOT NULL DEFAULT false, processing_history jsonb NOT NULL DEFAULT '[]', payload jsonb NOT NULL DEFAULT '{}', PRIMARY KEY(tenant_id,event_id,observed_at)) PARTITION BY RANGE(observed_at);
 -- Partition manager creates the current month, N months ahead, and a small
--- back-window. It must apply ENABLE + FORCE RLS and the same policy below to
--- every partition it creates. No DEFAULT partition is used.
+-- back-window. It must grant direct maintenance access and apply ENABLE +
+-- FORCE RLS plus the same policy below to every partition it creates. No
+-- DEFAULT partition is used.
 CREATE TABLE events_2026_08 PARTITION OF events FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
 ALTER TABLE events_2026_08 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE events_2026_08 FORCE ROW LEVEL SECURITY;
@@ -77,20 +81,21 @@ CREATE UNIQUE INDEX assets_tenant_id_uq ON assets(tenant_id,id);
 CREATE UNIQUE INDEX ai_investigations_tenant_id_uq ON ai_investigations(tenant_id,id);
 CREATE UNIQUE INDEX response_actions_tenant_id_uq ON response_actions(tenant_id,id);
 
-ALTER TABLE role_permissions ADD CONSTRAINT role_permissions_role_tenant_fk FOREIGN KEY (tenant_id,role_id) REFERENCES roles(tenant_id,id);
+ALTER TABLE role_permissions ADD CONSTRAINT role_permissions_role_tenant_fk FOREIGN KEY (tenant_id,role_id) REFERENCES roles(tenant_id,id) ON DELETE CASCADE;
 ALTER TABLE role_assignments ADD CONSTRAINT role_assignments_user_tenant_fk FOREIGN KEY (tenant_id,user_id) REFERENCES users(tenant_id,id);
 ALTER TABLE role_assignments ADD CONSTRAINT role_assignments_role_tenant_fk FOREIGN KEY (tenant_id,role_id) REFERENCES roles(tenant_id,id);
-ALTER TABLE connector_health ADD CONSTRAINT connector_health_connector_tenant_fk FOREIGN KEY (tenant_id,connector_id) REFERENCES connectors(tenant_id,id);
+ALTER TABLE connector_health ADD CONSTRAINT connector_health_connector_tenant_fk FOREIGN KEY (tenant_id,connector_id) REFERENCES connectors(tenant_id,id) ON DELETE CASCADE;
 ALTER TABLE alerts ADD CONSTRAINT alerts_rule_tenant_fk FOREIGN KEY (tenant_id,rule_id) REFERENCES detection_rules(tenant_id,id);
 ALTER TABLE incidents ADD CONSTRAINT incidents_assignee_tenant_fk FOREIGN KEY (tenant_id,assignee_id) REFERENCES users(tenant_id,id);
-ALTER TABLE incident_events ADD CONSTRAINT incident_events_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id);
-ALTER TABLE evidence ADD CONSTRAINT evidence_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id);
+ALTER TABLE incident_events ADD CONSTRAINT incident_events_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id) ON DELETE CASCADE;
+ALTER TABLE incident_events ADD CONSTRAINT incident_events_event_fk FOREIGN KEY (event_tenant_id,event_id,observed_at) REFERENCES events(tenant_id,event_id,observed_at);
+ALTER TABLE evidence ADD CONSTRAINT evidence_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id) ON DELETE CASCADE;
 ALTER TABLE evidence ADD CONSTRAINT evidence_collector_tenant_fk FOREIGN KEY (tenant_id,collected_by) REFERENCES users(tenant_id,id);
 ALTER TABLE tasks ADD CONSTRAINT tasks_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id);
 ALTER TABLE tasks ADD CONSTRAINT tasks_assignee_tenant_fk FOREIGN KEY (tenant_id,assignee_id) REFERENCES users(tenant_id,id);
 ALTER TABLE comments ADD CONSTRAINT comments_incident_tenant_fk FOREIGN KEY (tenant_id,incident_id) REFERENCES incidents(tenant_id,id);
 ALTER TABLE comments ADD CONSTRAINT comments_author_tenant_fk FOREIGN KEY (tenant_id,author_id) REFERENCES users(tenant_id,id);
-ALTER TABLE asset_owners ADD CONSTRAINT asset_owners_asset_tenant_fk FOREIGN KEY (tenant_id,asset_id) REFERENCES assets(tenant_id,id);
+ALTER TABLE asset_owners ADD CONSTRAINT asset_owners_asset_tenant_fk FOREIGN KEY (tenant_id,asset_id) REFERENCES assets(tenant_id,id) ON DELETE CASCADE;
 ALTER TABLE asset_owners ADD CONSTRAINT asset_owners_user_tenant_fk FOREIGN KEY (tenant_id,user_id) REFERENCES users(tenant_id,id);
 ALTER TABLE identities ADD CONSTRAINT identities_asset_tenant_fk FOREIGN KEY (tenant_id,asset_id) REFERENCES assets(tenant_id,id);
 ALTER TABLE vulnerabilities ADD CONSTRAINT vulnerabilities_asset_tenant_fk FOREIGN KEY (tenant_id,asset_id) REFERENCES assets(tenant_id,id);
@@ -120,14 +125,27 @@ END $$;
 CREATE POLICY tenant_isolation ON tenants
   USING (id = current_setting('app.current_tenant', true)::uuid)
   WITH CHECK (id = current_setting('app.current_tenant', true)::uuid);
+CREATE POLICY platform_admin_tenant_registry ON tenants TO platform_admin
+  USING (true) WITH CHECK (true);
 
--- Grant split: tenant-plane CRUD is available to app_runtime except the
--- control-plane registry; platform_admin owns tenant-registry operations.
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_runtime;
+-- Grant split: app_runtime gets DML only on tenant-plane tables. Global
+-- catalogues are explicit SELECT-only grants; the registry is inaccessible.
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+  users, roles, role_permissions, role_assignments, api_keys,
+  identity_providers, connectors, connector_health, raw_event_refs, events,
+  parsers, detection_rules, alerts, incidents, incident_events, evidence,
+  tasks, comments, assets, asset_owners, business_services, identities,
+  vulnerabilities, threat_intel, ai_investigations, response_actions,
+  approvals, notifications, reports, retention_policies TO app_runtime;
+GRANT SELECT ON permissions TO app_runtime;
 REVOKE ALL ON tenants FROM app_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON tenants TO platform_admin;
 GRANT SELECT, INSERT ON audit_log TO app_runtime;
 REVOKE UPDATE, DELETE ON audit_log FROM app_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT ON TABLES TO app_runtime;
 
 DO $$
 BEGIN
@@ -136,18 +154,44 @@ BEGIN
     FROM pg_class c
     JOIN pg_roles r ON r.oid = c.relowner
     WHERE r.rolname = 'app_runtime'
-      AND c.relkind IN ('r', 'p')
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
   ) THEN
     RAISE EXCEPTION 'app_runtime must not own application tables';
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime' AND rolsuper) THEN
-    RAISE EXCEPTION 'app_runtime must not be a superuser';
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('app_runtime', 'platform_admin') AND rolsuper) THEN
+    RAISE EXCEPTION 'service group roles must not be superusers';
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime' AND rolbypassrls) THEN
-    RAISE EXCEPTION 'app_runtime must not bypass RLS';
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('app_runtime', 'platform_admin') AND rolbypassrls) THEN
+    RAISE EXCEPTION 'service group roles must not bypass RLS';
   END IF;
 END $$;
 
--- The application role must also be granted only INSERT/SELECT on this table;
--- deployment migrations should explicitly revoke UPDATE and DELETE.
+-- Append-only audit grants are defined above; PUBLIC cannot mutate it.
 REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC;
+
+-- Deployment invokes this as each per-service LOGIN role. Checking
+-- current_user (rather than only the group roles above) catches an unsafe
+-- connecting role even when its group membership looks correct.
+CREATE OR REPLACE FUNCTION assert_connecting_role()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles
+    WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION 'connecting role must not be superuser or bypass RLS';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class
+    WHERE relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+      AND relkind IN ('r', 'p', 'v', 'm', 'f')
+  ) THEN
+    RAISE EXCEPTION 'connecting role must not own application objects';
+  END IF;
+END $$;
+GRANT EXECUTE ON FUNCTION assert_connecting_role() TO app_runtime, platform_admin;

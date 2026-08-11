@@ -18,8 +18,8 @@
 
 No production runtime is included in Phase 0.
 
-## Phase 0 deviations recorded for implementation
+## Phase 1 additions
 
-- `incident_events` retains `CHECK (event_tenant_id = tenant_id)` but deliberately has no FK to partitioned `events`; application validation preserves partition retirement.
-- Tenant-registry data access is platform-admin-only, including data migrations; the DDL owner is not a registry service.
-- Runtime grants keep raw references, evidence, and audit immutable (`SELECT`+`INSERT`); retention purges use a separate maintenance role.
+- [Setup](setup.md)
+- [Backup and restore runbook](runbooks/backup-restore.md)
+- [ADRs](adr/)

@@ -1,0 +1,64 @@
+[project]
+name = "fiji-cyber-operations-platform"
+version = "0.1.0"
+description = "Phase 1 secure foundation for the Fiji and Pacific Cyber Operations Platform"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "alembic==1.16.4",
+  "argon2-cffi==25.1.0",
+  "asyncpg==0.30.0",
+  "boto3==1.39.10",
+  "cryptography==50.0.0",
+  "email-validator==2.3.0",
+  "fastapi==0.141.1",
+  "httpx==0.28.1",
+  "pydantic==2.11.7",
+  "pydantic-settings==2.10.1",
+  "PyJWT==2.13.0",
+  "pyotp==2.9.0",
+  "python-multipart==0.0.31",
+  "redis==6.2.0",
+  "sqlalchemy[asyncio]==2.0.41",
+  "uvicorn[standard]==0.35.0",
+]
+
+[dependency-groups]
+dev = [
+  "mypy==1.17.0",
+  "pip-audit==2.9.0",
+  "pytest==9.0.3",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.12.4",
+  "types-boto3==1.39.10",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S105", "S106"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+"backend/alembic/versions/*.py" = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "backend"
+exclude = "backend/alembic"
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["backend"]

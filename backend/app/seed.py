@@ -31,7 +31,8 @@ async def seed() -> None:
                 await session.execute(
                     text(
                         "INSERT INTO users (tenant_id,email,display_name,password_hash,created_at) "
-                        "VALUES (:tenant,:email,:name,:password,:created)"
+                        "VALUES (:tenant,:email,:name,:password,:created) "
+                        "ON CONFLICT (tenant_id,email) DO NOTHING"
                     ),
                     {
                         "tenant": str(resolved_id),

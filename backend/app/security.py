@@ -107,4 +107,7 @@ def ip_allowed(address: str, allowlist: list[str] | None) -> bool:
     if not allowlist:
         return True
     candidate = ip_address(address)
-    return any(candidate in ip_network(item) if "/" in item else candidate == ip_address(item) for item in allowlist)
+    return any(
+        candidate in ip_network(str(item)) if "/" in str(item) else candidate == ip_address(str(item))
+        for item in allowlist
+    )

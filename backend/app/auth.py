@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from app.audit import append_audit
-from app.config import get_settings
+from app.db import session_factory
 from app.security import (
     decrypt_totp_secret,
     hash_token,
@@ -13,7 +13,7 @@ from app.security import (
     verify_totp,
 )
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @dataclass(frozen=True)
@@ -23,8 +23,14 @@ class TokenPair:
     token_type: str = "bearer"
 
 
-auth_engine = create_async_engine(get_settings().ddl_database_url, pool_pre_ping=True)
-auth_sessions = async_sessionmaker(auth_engine, expire_on_commit=False)
+auth_sessions = session_factory
+
+
+async def _set_tenant(session: AsyncSession, tenant_id: UUID) -> None:
+    await session.execute(
+        text("SELECT set_config('app.current_tenant', :tenant, true)"),
+        {"tenant": str(tenant_id)},
+    )
 
 
 async def authenticate(
@@ -36,21 +42,26 @@ async def authenticate(
     async with auth_sessions() as session:
         async with session.begin():
             row = await session.execute(
-                text(
-                    "SELECT u.id, u.tenant_id, u.password_hash, u.mfa_enabled, u.disabled_at, "
-                    "u.failed_login_count, u.locked_until, t.slug "
-                    "FROM users u JOIN tenants t ON t.id = u.tenant_id "
-                    "WHERE u.email = :email AND (CAST(:slug AS text) IS NULL OR t.slug = :slug) "
-                    "ORDER BY u.created_at LIMIT 1 FOR UPDATE"
-                ),
+                text("SELECT * FROM resolve_login_identity(CAST(:email AS citext), CAST(:slug AS text))"),
                 {"email": email, "slug": tenant_slug},
             )
             user = row.mappings().first()
             now = datetime.now(UTC)
             if user is None:
                 raise ValueError("invalid credentials")
-            user_id = UUID(str(user["id"]))
+            user_id = UUID(str(user["user_id"]))
             tenant_id = UUID(str(user["tenant_id"]))
+            await _set_tenant(session, tenant_id)
+            locked = await session.execute(
+                text(
+                    "SELECT id, tenant_id, password_hash, mfa_enabled, disabled_at, "
+                    "failed_login_count, locked_until FROM users WHERE id = :user FOR UPDATE"
+                ),
+                {"user": user_id},
+            )
+            user = locked.mappings().first()
+            if user is None:
+                raise ValueError("invalid credentials")
             locked_until = user["locked_until"]
             if user["disabled_at"] is not None or (locked_until is not None and locked_until > now):
                 await append_audit(session, tenant_id, user_id, "auth.login_denied", "user", str(user_id), {})
@@ -131,6 +142,7 @@ async def rotate_refresh_token(token: str) -> TokenPair:
     family_id = UUID(str(claims["family_id"]))
     async with auth_sessions() as session:
         async with session.begin():
+            await _set_tenant(session, tenant_id)
             result = await session.execute(
                 text(
                     "SELECT id, used_at, revoked_at, expires_at FROM refresh_tokens "
@@ -153,6 +165,7 @@ async def rotate_refresh_token(token: str) -> TokenPair:
                 await append_audit(
                     session, tenant_id, user_id, "auth.refresh_reuse", "token_family", str(family_id), {}
                 )
+                await session.commit()
                 raise ValueError("refresh token reuse detected")
             await session.execute(
                 text("UPDATE refresh_tokens SET used_at = :now WHERE id = :id"),
@@ -196,6 +209,7 @@ async def logout(token: str) -> None:
     tenant_id = UUID(str(claims["tenant_id"]))
     async with auth_sessions() as session:
         async with session.begin():
+            await _set_tenant(session, tenant_id)
             await session.execute(
                 text("UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = :family"),
                 {"family": family_id},

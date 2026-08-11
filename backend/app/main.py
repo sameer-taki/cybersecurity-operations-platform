@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -5,10 +6,12 @@ from uuid import UUID, uuid4
 
 from app.audit import append_audit
 from app.auth import auth_sessions, authenticate, logout, rotate_refresh_token
+from app.config import get_settings
 from app.db import platform_session_factory
 from app.deps import platform_admin_access, tenant_session
 from app.event_contract import event_json_schema
-from app.rbac import Principal
+from app.logging_redaction import SecretRedactionFilter
+from app.rbac import Principal, attributes_match
 from app.security import (
     encrypt_totp_secret,
     hash_password,
@@ -59,6 +62,8 @@ class ApiKeyCreateRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    root_logger = logging.getLogger()
+    root_logger.addFilter(SecretRedactionFilter([get_settings().jwt_secret, get_settings().totp_encryption_key]))
     yield
 
 
@@ -150,6 +155,18 @@ async def require_tenant_admin(
     session, principal = session_and_principal
     if "tenant:admin" not in principal.permissions:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="permission denied")
+    assignments = await session.execute(
+        text(
+            "SELECT attributes FROM role_assignments ra "
+            "JOIN roles r ON r.id = ra.role_id AND r.tenant_id = ra.tenant_id "
+            "JOIN role_permissions rp ON rp.role_id = ra.role_id AND rp.tenant_id = ra.tenant_id "
+            "JOIN permissions p ON p.id = rp.permission_id "
+            "WHERE ra.user_id = :user AND ra.tenant_id = :tenant AND p.key = 'tenant:admin'"
+        ),
+        {"user": principal.user_id, "tenant": principal.tenant_id},
+    )
+    if not any(attributes_match(dict(row[0] or {}), principal.attributes) for row in assignments):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="permission denied")
     return session, principal
 
 
@@ -165,6 +182,11 @@ async def create_tenant(
                 text("INSERT INTO tenants (id,name,slug) VALUES (:id,:name,:slug)"),
                 {"id": tenant_id, "name": request.name, "slug": request.slug},
             )
+            await session.execute(
+                text("SELECT set_config('app.current_tenant', :tenant, true)"),
+                {"tenant": str(tenant_id)},
+            )
+            await append_audit(session, tenant_id, None, "tenant.created", "tenant", str(tenant_id), {})
     return {"id": str(tenant_id), "slug": request.slug}
 
 
@@ -297,15 +319,35 @@ async def api_key_principal(
     if not api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key required")
     async with auth_sessions() as session:
-        result = await session.execute(
-            text(
-                "SELECT id, tenant_id, scopes, ip_allowlist FROM api_keys "
-                "WHERE prefix = :prefix AND key_hash = encode(digest(:key, 'sha256'), 'hex') "
-                "AND revoked_at IS NULL"
-            ),
-            {"prefix": api_key[:12], "key": api_key},
-        )
-        row = result.mappings().first()
+        async with session.begin():
+            result = await session.execute(
+                text("SELECT * FROM resolve_api_key(:prefix, encode(digest(:key, 'sha256'), 'hex'))"),
+                {"prefix": api_key[:12], "key": api_key},
+            )
+            row = result.mappings().first()
+            if row is not None:
+                await session.execute(
+                    text("SELECT set_config('app.current_tenant', :tenant, true)"),
+                    {"tenant": str(row["tenant_id"])},
+                )
         if row is None or (client_ip and not ip_allowed(client_ip.split(",")[0].strip(), row["ip_allowlist"])):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid API key")
-        return Principal(UUID(str(row["id"])), UUID(str(row["tenant_id"])), frozenset(row["scopes"]), {})
+        return Principal(UUID(str(row["key_id"])), UUID(str(row["tenant_id"])), frozenset(row["scopes"]), {})
+
+
+def require_api_scope(scope: str) -> object:
+    async def dependency(
+        principal: Annotated[Principal, Depends(api_key_principal)],
+    ) -> Principal:
+        if scope not in principal.permissions:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key scope required")
+        return principal
+
+    return dependency
+
+
+@app.get("/api/v1/protected/events/summary")
+async def protected_event_summary(
+    _principal: Annotated[Principal, Depends(require_api_scope("events:read"))],
+) -> dict[str, str]:
+    return {"status": "api-key-protected"}

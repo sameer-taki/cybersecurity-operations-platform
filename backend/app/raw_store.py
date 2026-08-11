@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 import boto3
@@ -81,7 +81,11 @@ class S3RawObjectStore:
         key = uri.removeprefix("object://raw/")
         response = await asyncio.to_thread(self.client.get_object, Bucket=self.bucket, Key=key)
         body = response["Body"]
-        return await asyncio.to_thread(body.read)
+        content = cast(bytes, await asyncio.to_thread(body.read))
+        expected = response.get("Metadata", {}).get("sha256")
+        if expected != hashlib.sha256(content).hexdigest():
+            raise ValueError("raw object SHA-256 metadata mismatch")
+        return content
 
 
 def observed_at_is_in_window(

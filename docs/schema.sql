@@ -163,7 +163,7 @@ BEGIN
     WHERE r.rolname IN ('app_runtime', 'platform_admin')
       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
   ) THEN
-    RAISE EXCEPTION 'app_runtime must not own application tables';
+    RAISE EXCEPTION 'service group role % must not own application objects', (SELECT string_agg(r.rolname, ',') FROM pg_roles r JOIN pg_class c ON c.relowner = r.oid WHERE r.rolname IN ('app_runtime', 'platform_admin') AND c.relkind IN ('r', 'p', 'v', 'm', 'f'));
   END IF;
   IF EXISTS (
     SELECT 1

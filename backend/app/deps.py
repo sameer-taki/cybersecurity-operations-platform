@@ -27,12 +27,18 @@ async def authenticated_principal(
     return Principal(user_id, tenant_id, frozenset(permissions_value), {})
 
 
-async def platform_admin_principal(
-    principal: Annotated[Principal, Depends(authenticated_principal)],
-) -> Principal:
-    if "platform:admin" not in principal.permissions:
+async def platform_admin_access(
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
+    try:
+        payload = decode_token(authorization.removeprefix("Bearer "), "access")
+    except (ValueError, KeyError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token") from None
+    permissions_value = payload.get("permissions", [])
+    if not isinstance(permissions_value, list) or "platform:admin" not in permissions_value:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="platform-admin permission required")
-    return principal
 
 
 async def tenant_session(

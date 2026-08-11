@@ -40,7 +40,7 @@ async def authenticate(
                     "SELECT u.id, u.tenant_id, u.password_hash, u.mfa_enabled, u.disabled_at, "
                     "u.failed_login_count, u.locked_until, t.slug "
                     "FROM users u JOIN tenants t ON t.id = u.tenant_id "
-                    "WHERE u.email = :email AND (:slug IS NULL OR t.slug = :slug) "
+                    "WHERE u.email = :email AND (CAST(:slug AS text) IS NULL OR t.slug = :slug) "
                     "ORDER BY u.created_at LIMIT 1 FOR UPDATE"
                 ),
                 {"email": email, "slug": tenant_slug},

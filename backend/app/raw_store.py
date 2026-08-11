@@ -8,6 +8,7 @@ from uuid import UUID
 import boto3
 from app.config import get_settings
 from app.event_contract import raw_object_uri, validate_raw_object_uri
+from botocore.exceptions import ClientError
 
 
 class RawObjectStore(Protocol):
@@ -59,7 +60,9 @@ class S3RawObjectStore:
         def upload() -> None:
             try:
                 self.client.head_bucket(Bucket=self.bucket)
-            except self.client.exceptions.NoSuchBucket:
+            except ClientError as error:
+                if error.response.get("Error", {}).get("Code") not in {"404", "NoSuchBucket"}:
+                    raise
                 self.client.create_bucket(Bucket=self.bucket)
             self.client.put_object(
                 Bucket=self.bucket,

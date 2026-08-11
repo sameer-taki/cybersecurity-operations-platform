@@ -36,7 +36,7 @@ async def seed() -> None:
                     ),
                     {
                         "tenant": str(resolved_id),
-                        "email": f"admin{index}@example.test",
+                        "email": f"admin{index}@example.com",
                         "name": f"Dev Admin {index}",
                         "password": hash_password("DevOnly-ChangeMe-123!"),
                         "created": datetime.now(UTC),
@@ -80,7 +80,7 @@ async def seed() -> None:
             )
     print(
         "Seeded dev-tenant-1 and dev-tenant-2; credentials are "
-        "admin1@example.test/admin2@example.test with password "
+        "admin1@example.com/admin2@example.com with password "
         "DevOnly-ChangeMe-123!"
     )
     await engine.dispose()

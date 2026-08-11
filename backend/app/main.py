@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 from app.audit import append_audit
 from app.auth import auth_sessions, authenticate, logout, rotate_refresh_token
 from app.db import platform_session_factory
-from app.deps import tenant_session
+from app.deps import platform_admin_principal, tenant_session
 from app.event_contract import event_json_schema
 from app.rbac import Principal
 from app.security import (
@@ -154,7 +154,10 @@ async def require_tenant_admin(
 
 
 @app.post("/api/v1/platform/tenants", status_code=status.HTTP_201_CREATED)
-async def create_tenant(request: TenantCreateRequest) -> dict[str, str]:
+async def create_tenant(
+    request: TenantCreateRequest,
+    _principal: Annotated[Principal, Depends(platform_admin_principal)],
+) -> dict[str, str]:
     async with platform_session_factory() as session:
         async with session.begin():
             tenant_id = uuid4()
@@ -264,6 +267,27 @@ async def create_api_key(
         {"scopes": request.scopes},
     )
     return {"id": str(key_id), "secret": secret, "scopes": request.scopes}
+
+
+@app.post("/api/v1/tenant/api-keys/{key_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_api_key(
+    key_id: UUID,
+    session_and_principal: tuple[AsyncSession, Principal] = Depends(require_tenant_admin),
+) -> None:
+    session, principal = session_and_principal
+    await session.execute(
+        text("UPDATE api_keys SET revoked_at = now() WHERE id = :id AND tenant_id = :tenant"),
+        {"id": key_id, "tenant": principal.tenant_id},
+    )
+    await append_audit(
+        session,
+        principal.tenant_id,
+        principal.user_id,
+        "tenant.api_key_revoked",
+        "api_key",
+        str(key_id),
+        {},
+    )
 
 
 async def api_key_principal(

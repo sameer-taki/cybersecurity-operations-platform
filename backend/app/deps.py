@@ -27,6 +27,14 @@ async def authenticated_principal(
     return Principal(user_id, tenant_id, frozenset(permissions_value), {})
 
 
+async def platform_admin_principal(
+    principal: Annotated[Principal, Depends(authenticated_principal)],
+) -> Principal:
+    if "platform:admin" not in principal.permissions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="platform-admin permission required")
+    return principal
+
+
 async def tenant_session(
     principal: Annotated[Principal, Depends(authenticated_principal)],
 ) -> AsyncIterator[tuple[AsyncSession, Principal]]:

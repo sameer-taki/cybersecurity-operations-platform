@@ -1,16 +1,6 @@
-import os
 from uuid import uuid4
 
-os.environ.setdefault("JWT_SECRET", "test-secret")
-os.environ.setdefault("TOTP_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://x:x@localhost/x")
-os.environ.setdefault("DDL_DATABASE_URL", "postgresql+asyncpg://x:x@localhost/x")
-os.environ.setdefault("S3_ENDPOINT", "http://localhost")
-os.environ.setdefault("S3_ACCESS_KEY", "x")
-os.environ.setdefault("S3_SECRET_KEY", "x")
-os.environ.setdefault("S3_BUCKET", "x")
-os.environ.setdefault("REDIS_URL", "redis://localhost")
-
+import pytest
 from app.event_contract import dedup_key, raw_object_uri, validate_raw_object_uri
 from app.rbac import attributes_match
 from app.security import (
@@ -24,6 +14,11 @@ from app.security import (
     verify_password,
     verify_totp,
 )
+
+
+@pytest.fixture(autouse=True)
+def _placeholder_env(placeholder_settings_env: None) -> None:
+    """These unit tests exercise pure crypto/contract helpers against throwaway configuration."""
 
 
 def test_password_hash_and_verify() -> None:

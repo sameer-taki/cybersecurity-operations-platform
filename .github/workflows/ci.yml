@@ -57,6 +57,7 @@ jobs:
           uv run alembic upgrade head
           uv run alembic downgrade base
           uv run alembic upgrade head
+          PYTHONPATH=backend PLATFORM_DATABASE_URL="$DDL_DATABASE_URL" uv run python -m app.seed
           uv run pytest -q
       - run: uv run pip-audit --strict
       - run: docker build -t cyberops-ci .
